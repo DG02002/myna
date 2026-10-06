@@ -1,8 +1,12 @@
 import { createFileRoute, Link } from "@tanstack/react-router"
-import { useSyncExternalStore } from "react"
+import { useCallback, useState, useSyncExternalStore } from "react"
 
 import { MediaInfo } from "#/components/player/media-info"
-import { WatchPlayer } from "#/components/player/watch-player"
+import {
+  PlaybackStage,
+  type PlaybackEngineMode,
+  type ProbeState,
+} from "#/components/player/playback-stage"
 import { Button } from "#/components/ui/button"
 import { loadSourceFromSession } from "#/media/models/source"
 
@@ -18,6 +22,19 @@ function WatchPage() {
     subscribeToNothing,
     loadSourceFromSession,
     () => undefined
+  )
+
+  const [probeState, setProbeState] = useState<ProbeState>({
+    status: "loading",
+  })
+
+  const [engineMode, setEngineMode] = useState<PlaybackEngineMode>("native")
+
+  const onProbe = useCallback((state: ProbeState) => setProbeState(state), [])
+
+  const onModeChange = useCallback(
+    (mode: PlaybackEngineMode) => setEngineMode(mode),
+    []
   )
 
   if (source === undefined) {
@@ -46,7 +63,12 @@ function WatchPage() {
 
   return (
     <main className="mx-auto flex w-full max-w-5xl flex-col gap-3 px-4 py-6">
-      <WatchPlayer source={source} />
+      <PlaybackStage
+        key={source.url}
+        source={source}
+        onProbe={onProbe}
+        onModeChange={onModeChange}
+      />
       <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-2">
         <p className="text-muted-foreground min-w-0 flex-1 truncate text-sm">
           <bdi>{safeHost(source.url)}</bdi>
@@ -58,7 +80,7 @@ function WatchPage() {
             Choose another link
           </Link>
         </p>
-        <MediaInfo source={source} />
+        <MediaInfo probeState={probeState} engineMode={engineMode} />
       </div>
     </main>
   )

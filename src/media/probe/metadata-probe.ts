@@ -9,7 +9,7 @@ import { proxiedMediaUrl } from "../proxy/proxied-url"
 
 type ProbeReadMode = "direct" | "proxy"
 
-interface ProbeTrackInfo {
+export interface ProbeTrackInfo {
   number: number
   kind: "video" | "audio"
   codecParameterString: string | null

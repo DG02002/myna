@@ -8,18 +8,34 @@ import { audioText } from "@videojs/core/i18n/text/menu"
 import { Menu } from "@videojs/react"
 import { Text as TextPrimitive } from "@videojs/react"
 import { SpeechIcon as SpeechIconPrimitive } from "@videojs/react/icons"
-import { AudioTrackRadioGroup } from "@videojs/react/ui/audio-track-radio-group"
 
+import { usePlayloomAudioTracks } from "#/components/player/audio-tracks-context"
 import { MenuChevron } from "#/components/videojs/ui/menu-chevron.tsx"
 import { RadioItem } from "#/components/videojs/ui/radio-item.tsx"
 import { cn } from "#/lib/utils.ts"
 
 export type AudioTrackMenuProps = Omit<Menu.RootProps, "children">
 
+// Playloom drives this menu from its own probe/engine track list: the
+// browser exposes no native audioTracks on this class of file, so the
+// store-backed radio group would always be empty.
 export function AudioTrackMenu({ ...props }: AudioTrackMenuProps = {}) {
+  const audioTracks = usePlayloomAudioTracks()
+
+  if (audioTracks === null || audioTracks.tracks.length === 0) {
+    return null
+  }
+
+  const selectedLabel =
+    audioTracks.tracks.find((track) => track.id === audioTracks.selectedId)
+      ?.label ?? ""
+
   return (
     <Menu.Root {...props}>
-      <AudioTrackRadioGroup.Root>
+      <Menu.RadioGroup
+        value={audioTracks.selectedId ?? ""}
+        onValueChange={audioTracks.selectTrack}
+      >
         <Menu.Trigger
           className={cn(
             "group/menu-trigger-item",
@@ -48,9 +64,9 @@ export function AudioTrackMenu({ ...props }: AudioTrackMenuProps = {}) {
           <span
             className={"ms-auto inline-flex min-w-0 items-center gap-1 ps-2"}
           >
-            <AudioTrackRadioGroup.Value
-              className={"max-w-24 truncate opacity-65"}
-            />
+            <span className="max-w-24 truncate opacity-65">
+              {selectedLabel}
+            </span>
             <MenuChevron />
           </span>
         </Menu.Trigger>
@@ -99,7 +115,7 @@ export function AudioTrackMenu({ ...props }: AudioTrackMenuProps = {}) {
               "shadow-media-separator"
             )}
           />
-          <AudioTrackRadioGroup.Options
+          <div
             className={cn(
               "flex [max-height:inherit] flex-col gap-0.5",
               "[anchor-scope:--media-menu-item-highlight-anchor]",
@@ -108,14 +124,15 @@ export function AudioTrackMenu({ ...props }: AudioTrackMenuProps = {}) {
               "media-transitioning:[&_*]:before:hidden",
               "media-anchored:has-data-[highlighted=]:before:duration-0"
             )}
-            renderItem={(props, item) => (
-              <RadioItem {...props}>
-                <span>{item.label}</span>
+          >
+            {audioTracks.tracks.map((track) => (
+              <RadioItem key={track.id} value={track.id}>
+                <span>{track.label}</span>
               </RadioItem>
-            )}
-          ></AudioTrackRadioGroup.Options>
+            ))}
+          </div>
         </Menu.Content>
-      </AudioTrackRadioGroup.Root>
+      </Menu.RadioGroup>
     </Menu.Root>
   )
 }
