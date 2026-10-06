@@ -1,0 +1,28 @@
+{
+  "semi": false,
+  "singleQuote": false,
+  "printWidth": 80,
+  "trailingComma": "es5",
+  "endOfLine": "lf",
+  "ignorePatterns": [
+    ".agent/**",
+    ".agents/**",
+    ".claude/**",
+    ".codex/**",
+    ".continue/**",
+    ".cursor/**",
+    ".gemini/**",
+    ".opencode/**",
+    ".pi/**",
+    ".repos/**",
+    ".roo/**",
+    ".windsurf/**",
+    "src/components/ui/**",
+    "src/routeTree.gen.ts",
+    "tools/oxlint/anti-slop/**",
+    "**/worker-configuration.d.ts"
+  ],
+  "tailwindStylesheet": "src/styles.css",
+  "tailwindFunctions": ["cn", "cva"],
+  "sortImports": true
+}

@@ -1,0 +1,24 @@
+{
+  // Markdown hygiene for repo-owned docs. The VS Code extension
+  // (DavidAnson.vscode-markdownlint) reads this same file, so editor,
+  // pre-commit, and CI all enforce one config.
+  "config": {
+    // Line length is not enforced; prose wrapping stays manual.
+    "MD013": false
+  },
+  "globs": [
+    "**/*.md",
+    "**/*.mdx"
+  ],
+  "ignores": [
+    "**/node_modules/**",
+    ".plans/**",
+    ".agents/**",
+    ".repos/**",
+    ".claude/**",
+    ".zcode/**",
+    ".wrangler/**",
+    "dist/**",
+    "temp/**"
+  ]
+}

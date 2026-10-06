@@ -3,3 +3,51 @@ allowBuilds:
   lightningcss: true
   sharp: true
   workerd: true
+
+blockExoticSubdeps: true
+
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - '@shadcn/registry@0.1.0'
+  - '@tanstack/react-start-client@1.168.39'
+  - '@tanstack/react-start-rsc@0.1.59'
+  - '@tanstack/react-start-server@1.167.46'
+  - '@tanstack/react-start@1.168.60'
+  - '@tanstack/router-core@1.171.34'
+  - '@tanstack/router-generator@1.167.40'
+  - '@tanstack/router-plugin@1.168.42'
+  - '@tanstack/start-plugin-core@1.171.49'
+  - browserslist@4.29.3
+  - rolldown@1.2.12
+  - shadcn@4.21.1
+  - '@cloudflare/workerd-darwin-64@1.20261001.1'
+  - '@cloudflare/workerd-darwin-arm64@1.20261001.1'
+  - '@cloudflare/workerd-linux-64@1.20261001.1'
+  - '@cloudflare/workerd-linux-arm64@1.20261001.1'
+  - '@cloudflare/workerd-windows-64@1.20261001.1'
+  - '@rolldown/binding-android-arm-eabi@1.2.12'
+  - '@rolldown/binding-android-arm64@1.2.12'
+  - '@rolldown/binding-darwin-arm64@1.2.12'
+  - '@rolldown/binding-darwin-x64@1.2.12'
+  - '@rolldown/binding-freebsd-x64@1.2.12'
+  - '@rolldown/binding-linux-arm-gnueabihf@1.2.12'
+  - '@rolldown/binding-linux-arm64-gnu@1.2.12'
+  - '@rolldown/binding-linux-arm64-musl@1.2.12'
+  - '@rolldown/binding-linux-ppc64-gnu@1.2.12'
+  - '@rolldown/binding-linux-s390x-gnu@1.2.12'
+  - '@rolldown/binding-linux-x64-gnu@1.2.12'
+  - '@rolldown/binding-linux-x64-musl@1.2.12'
+  - '@rolldown/binding-openharmony-arm64@1.2.12'
+  - '@rolldown/binding-win32-arm64-msvc@1.2.12'
+  - '@rolldown/binding-win32-x64-msvc@1.2.12'
+  - '@tanstack/react-router@1.170.41'
+  - '@tanstack/start-client-core@1.170.34'
+  - '@tanstack/start-server-core@1.169.39'
+  - '@tanstack/start-storage-context@1.167.36'
+  - miniflare@5.20261001.0-alpha
+  - workerd@1.20261001.1
+  - wrangler@4.147.0
+minimumReleaseAgeIgnoreMissingTime: false
+minimumReleaseAgeStrict: false
+
+strictDepBuilds: true

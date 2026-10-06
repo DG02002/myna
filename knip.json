@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/knip.schema.json",
+  "treatConfigHintsAsErrors": true,
+  "ignoreDependencies": [
+    "@hugeicons/core-free-icons",
+    "@hugeicons/react",
+    "class-variance-authority",
+    "cn",
+    "radix-ui"
+  ],
+  "entry": ["src/routes/**/*.{ts,tsx}!", "src/router.tsx!", "scripts/**/*.ts"],
+  "project": ["src/**/*.{ts,tsx}!", "src/**/*.css!", "scripts/**/*.ts", "*.ts"],
+  "ignore": ["src/lib/utils.ts"],
+  "ignoreIssues": {
+    "src/components/ui/**/*.tsx": ["exports"]
+  }
+}
