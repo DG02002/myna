@@ -47,6 +47,13 @@ minimumReleaseAgeExclude:
   - miniflare@5.20261001.0-alpha
   - workerd@1.20261001.1
   - wrangler@4.147.0
+  - '@videojs/core@10.0.1'
+  - '@videojs/media@10.0.1'
+  - '@videojs/native-hls-video@10.0.1'
+  - '@videojs/react@10.0.1'
+  - '@videojs/spf@10.0.1'
+  - '@videojs/store@10.0.1'
+  - '@videojs/utils@10.0.1'
 minimumReleaseAgeIgnoreMissingTime: false
 minimumReleaseAgeStrict: false
 

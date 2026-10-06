@@ -18,6 +18,7 @@
     ".roo/**",
     ".windsurf/**",
     "src/components/ui/**",
+    "src/lib/resolve-class-name.ts",
     "src/routeTree.gen.ts",
     "tools/oxlint/anti-slop/**",
     "**/worker-configuration.d.ts"
