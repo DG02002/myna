@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router"
 import { useSyncExternalStore } from "react"
 
+import { MediaInfo } from "#/components/player/media-info"
 import { WatchPlayer } from "#/components/player/watch-player"
 import { Button } from "#/components/ui/button"
 import { loadSourceFromSession } from "#/media/models/source"
@@ -46,16 +47,19 @@ function WatchPage() {
   return (
     <main className="mx-auto flex w-full max-w-5xl flex-col gap-3 px-4 py-6">
       <WatchPlayer source={source} />
-      <p className="text-muted-foreground truncate text-sm">
-        <bdi>{safeHost(source.url)}</bdi>
-        <Link
-          to="/"
-          className="text-foreground underline underline-offset-4 hover:opacity-80"
-        >
-          {" "}
-          Choose another link
-        </Link>
-      </p>
+      <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-2">
+        <p className="text-muted-foreground min-w-0 flex-1 truncate text-sm">
+          <bdi>{safeHost(source.url)}</bdi>
+          <Link
+            to="/"
+            className="text-foreground underline underline-offset-4 hover:opacity-80"
+          >
+            {" "}
+            Choose another link
+          </Link>
+        </p>
+        <MediaInfo source={source} />
+      </div>
     </main>
   )
 }
