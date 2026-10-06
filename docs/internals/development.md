@@ -55,6 +55,19 @@ Use targeted checks while iterating: `pnpm run lint`, `pnpm run typecheck`,
   `pnpm run sync:repos`. Read `.repos/effect/LLMS.md` before writing Effect
   code.
 
+## Authoritative library references
+
+Mediabunny ships no agent skill; its docs are the source of truth and must be
+read before writing code against it — never code Mediabunny from memory:
+
+- <https://mediabunny.dev/llms.txt> — doc index
+- <https://mediabunny.dev/llms-full.txt> — full guide
+- <https://mediabunny.dev/mediabunny.d.ts> — shipped TypeScript definitions
+
+Video.js 10 ships version-matched docs inside the installed packages at
+`node_modules/@videojs/*/docs/llms.txt`; the `videojs` agent skill
+(`.agents/skills/videojs`) indexes them.
+
 ## Deployment
 
 ```sh
