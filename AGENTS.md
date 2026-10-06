@@ -178,13 +178,17 @@ code.
 
 ## Where code lives
 
-- `src/routes/` - `__root`, `/` (URL entry), `/watch` (player),
-  `/api/media-proxy`.
+- `src/routes/` - `__root`, `/` (URL entry), `/watch` (player). Stable
+  TanStack Start has no file-based API routes; `src/worker.ts` is the
+  Cloudflare Worker entry (wrangler `main`) that wraps TanStack's handler and
+  serves `/api/media-proxy` from `src/media/proxy/` before framework routing.
 - `src/components/ui/` - generated shadcn primitives. Treat them as read-only;
   the formatter and linter exclude this directory. Delete wholly-unused
   components; knip flags them and the shadcn CLI can restore them.
+- `src/components/videojs/` - Video.js skin source from its shadcn registry.
+  Keep the default skin; customize copy only when the product needs it.
 - `src/components/player/` - player shell, settings, track menus, errors.
-- `src/media/` - playback controller, engines, probe, audio clock, models.
+- `src/media/` - playback controller, engines, probe, proxy, models.
 - `tools/oxlint/anti-slop/` - vendored Oxlint plugin installed by the
   `install-anti-slop` skill. Never edit or reformat it; update it by
   re-running the skill.
