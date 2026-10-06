@@ -1,0 +1,26 @@
+node_modules
+.DS_Store
+dist
+dist-ssr
+*.local
+.env
+.nitro
+.tanstack
+.wrangler
+.output
+.vinxi
+__unconfig*
+todos.json
+
+.dev.vars*
+!.dev.vars.example
+!.env.example
+
+# Generated Wrangler runtime types (cf-typegen); regenerated in check
+worker-configuration.d.ts
+
+# Vendored read-only reference repos and agent scratch
+.repos/
+.plans/
+.zcode/
+temp/
