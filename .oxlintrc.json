@@ -49,6 +49,36 @@
   },
   "overrides": [
     {
+      // Tests orchestrate real requests and assert on outcomes; the
+      // application-wide function-size limits fight that shape.
+      "files": ["src/**/*.test.ts"],
+      "plugins": ["typescript", "vitest"],
+      "rules": {
+        "consistent-function-scoping": "off",
+        "max-params": "off",
+        "max-statements": "off",
+        "no-await-in-loop": "off",
+        "react-hooks/rules-of-hooks": "off",
+        "react-hooks/exhaustive-deps": "off",
+        "vitest/no-focused-tests": "error",
+        "vitest/no-disabled-tests": "error",
+        "vitest/hoisted-apis-on-top": "error",
+        "vitest/require-mock-type-parameters": "off",
+        "vitest/require-to-throw-message": "off",
+        "vitest/no-conditional-expect": "off",
+        "vitest/valid-expect": "off",
+        "vitest/expect-expect": "off"
+      }
+    },
+    {
+      // The test upstream is one flat route table; splitting the
+      // dispatcher would hurt it.
+      "files": ["src/media/proxy/upstream-mock.js"],
+      "rules": {
+        "max-statements": "off"
+      }
+    },
+    {
       // The Video.js skin source follows the registry's own conventions
       // (media-* utilities, arbitrary values, duplicated imports); the
       // shadcn design contracts govern application code only.
