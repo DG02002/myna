@@ -80,7 +80,12 @@ function WatchPage() {
             Choose another link
           </Link>
         </p>
-        <MediaInfo probeState={probeState} engineMode={engineMode} />
+        <MediaInfo
+          key={source.url}
+          sourceUrl={source.url}
+          probeState={probeState}
+          engineMode={engineMode}
+        />
       </div>
     </main>
   )

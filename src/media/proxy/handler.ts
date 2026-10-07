@@ -23,11 +23,15 @@ const PASSTHROUGH_RESPONSE_HEADERS = [
 const CORS_ALLOW_HEADERS = "If-Modified-Since, If-None-Match, If-Range, Range"
 
 const CORS_EXPOSE_HEADERS =
-  "Accept-Ranges, Cache-Control, Content-Length, Content-Range, Content-Type, ETag, Last-Modified"
+  "Accept-Ranges, Cache-Control, Content-Length, Content-Range, Content-Type, ETag, Last-Modified, Server-Timing"
 
 const MAX_REDIRECT_HOPS = 5
 
 const HEADER_DEADLINE_MS = 30_000
+
+interface UpstreamTiming {
+  responseWaitMs: number
+}
 
 function applyCors(headers: Headers): void {
   headers.set("Access-Control-Allow-Origin", "*")
@@ -119,16 +123,15 @@ function redirectDestination(response: Response, base: URL): URL | Response {
   return next
 }
 
-function createUpstreamFetcher(
-  method: string,
-  requestHeaders: Headers,
-  clientSignal: AbortSignal
-) {
+function createUpstreamFetcher(request: Request, timing: UpstreamTiming) {
+  const requestHeaders = forwardableHeaders(request)
+
   const singleFetch = async (destination: URL): Promise<Response> => {
     const controller = new AbortController()
+    const startedAt = performance.now()
 
     const abortFromClient = () => controller.abort()
-    clientSignal.addEventListener("abort", abortFromClient, { once: true })
+    request.signal.addEventListener("abort", abortFromClient, { once: true })
 
     // The deadline bounds waiting for response headers; once the body
     // streams, client disconnect is the only cancellation path.
@@ -136,7 +139,7 @@ function createUpstreamFetcher(
 
     try {
       return await fetch(destination, {
-        method,
+        method: request.method,
         headers: requestHeaders,
         redirect: "manual",
         signal: controller.signal,
@@ -148,8 +151,9 @@ function createUpstreamFetcher(
         "The media server could not be reached."
       )
     } finally {
+      timing.responseWaitMs += performance.now() - startedAt
       clearTimeout(deadline)
-      clientSignal.removeEventListener("abort", abortFromClient)
+      request.signal.removeEventListener("abort", abortFromClient)
     }
   }
 
@@ -181,7 +185,7 @@ function createUpstreamFetcher(
   }
 }
 
-function proxyResponse(upstream: Response): Response {
+function proxyResponse(upstream: Response, timing: UpstreamTiming): Response {
   const headers = new Headers()
 
   for (const name of PASSTHROUGH_RESPONSE_HEADERS) {
@@ -191,6 +195,11 @@ function proxyResponse(upstream: Response): Response {
       headers.set(name, value)
     }
   }
+
+  headers.set(
+    "Server-Timing",
+    `upstream;dur=${Math.max(0, timing.responseWaitMs).toFixed(1)}`
+  )
 
   applyCors(headers)
 
@@ -242,13 +251,11 @@ export async function mediaProxy(request: Request): Promise<Response> {
     return errorResponse(403, "proxy_forbidden_destination", rejection)
   }
 
-  const fetchUpstream = createUpstreamFetcher(
-    request.method,
-    forwardableHeaders(request),
-    request.signal
-  )
+  const timing: UpstreamTiming = { responseWaitMs: 0 }
+
+  const fetchUpstream = createUpstreamFetcher(request, timing)
 
   const upstream = await fetchUpstream(destination, MAX_REDIRECT_HOPS)
 
-  return proxyResponse(upstream)
+  return proxyResponse(upstream, timing)
 }

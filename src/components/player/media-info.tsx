@@ -1,3 +1,4 @@
+import { NetworkInfo } from "#/components/player/network-info"
 import type {
   PlaybackEngineMode,
   ProbeState,
@@ -5,9 +6,11 @@ import type {
 import { durationLabel, probeTrackLabel } from "#/media/probe/track-labels"
 
 export function MediaInfo({
+  sourceUrl,
   probeState,
   engineMode,
 }: {
+  sourceUrl: string
   probeState: ProbeState
   engineMode: PlaybackEngineMode
 }) {
@@ -16,6 +19,7 @@ export function MediaInfo({
       {import.meta.env.DEV ? (
         <EngineBadge probeState={probeState} engineMode={engineMode} />
       ) : null}
+      <NetworkInfo sourceUrl={sourceUrl} engineMode={engineMode} />
       {probeState.status === "loading" ? (
         <p className="text-xs">Reading media information…</p>
       ) : null}
