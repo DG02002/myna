@@ -29,8 +29,38 @@ const MAX_REDIRECT_HOPS = 5
 
 const HEADER_DEADLINE_MS = 30_000
 
+const RATE_LIMIT_PERIOD_SECONDS = 60
+
 interface UpstreamTiming {
   responseWaitMs: number
+}
+
+function rateLimiter(env: Cloudflare.Env | undefined): RateLimit | undefined {
+  return env?.RATE_LIMITER
+}
+
+async function withinRateLimit(
+  limiter: RateLimit,
+  request: Request
+): Promise<boolean> {
+  try {
+    const key = request.headers.get("CF-Connecting-IP") ?? "unknown"
+
+    return (await limiter.limit({ key })).success
+  } catch (error) {
+    // Fail open: the binding is a permissive, eventually consistent backstop
+    // against relay abuse, so an unavailable limiter must not take playback
+    // down with it.
+    console.error(
+      JSON.stringify({
+        source: "media-proxy",
+        event: "rate_limiter_unavailable",
+        error: error instanceof Error ? error.message : String(error),
+      })
+    )
+
+    return true
+  }
 }
 
 function applyCors(headers: Headers): void {
@@ -210,7 +240,34 @@ function proxyResponse(upstream: Response, timing: UpstreamTiming): Response {
   })
 }
 
-export async function mediaProxy(request: Request): Promise<Response> {
+// Parses and validates the requested destination. Returns the destination,
+// or a complete error response when the url parameter is missing or invalid.
+function requestedDestination(request: Request): URL | Response {
+  const rawUrl = new URL(request.url).searchParams.get("url")
+
+  if (rawUrl === null || rawUrl.length === 0) {
+    return errorResponse(
+      400,
+      "proxy_missing_url",
+      "Pass the media URL as the url query parameter."
+    )
+  }
+
+  try {
+    return new URL(rawUrl)
+  } catch {
+    return errorResponse(
+      400,
+      "proxy_invalid_url",
+      "The url query parameter is not a valid URL."
+    )
+  }
+}
+
+export async function mediaProxy(
+  request: Request,
+  env?: Cloudflare.Env
+): Promise<Response> {
   if (request.method === "OPTIONS") {
     return preflightResponse()
   }
@@ -223,26 +280,24 @@ export async function mediaProxy(request: Request): Promise<Response> {
     )
   }
 
-  const rawUrl = new URL(request.url).searchParams.get("url")
+  const limiter = rateLimiter(env)
 
-  if (rawUrl === null || rawUrl.length === 0) {
-    return errorResponse(
-      400,
-      "proxy_missing_url",
-      "Pass the media URL as the url query parameter."
+  if (limiter !== undefined && !(await withinRateLimit(limiter, request))) {
+    const response = errorResponse(
+      429,
+      "proxy_rate_limited",
+      "Too many proxy requests from this client; retry shortly."
     )
+
+    response.headers.set("Retry-After", String(RATE_LIMIT_PERIOD_SECONDS))
+
+    return response
   }
 
-  let destination: URL
+  const destination = requestedDestination(request)
 
-  try {
-    destination = new URL(rawUrl)
-  } catch {
-    return errorResponse(
-      400,
-      "proxy_invalid_url",
-      "The url query parameter is not a valid URL."
-    )
+  if (destination instanceof Response) {
+    return destination
   }
 
   const rejection = rejectDestination(destination)

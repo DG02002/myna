@@ -36,6 +36,33 @@ async function responseBody(response: Response): Promise<{
   return response.json<{ error: string; message: string }>()
 }
 
+interface LimiterStub {
+  limiter: RateLimit
+  keys: string[]
+}
+
+function limiterStub(behavior: "allow" | "deny" | "fail"): LimiterStub {
+  const keys: string[] = []
+
+  const limiter: RateLimit = {
+    async limit(options) {
+      keys.push(options.key)
+
+      if (behavior === "deny") {
+        return { success: false }
+      }
+
+      if (behavior === "fail") {
+        throw new Error("limiter unavailable")
+      }
+
+      return { success: true }
+    },
+  }
+
+  return { limiter, keys }
+}
+
 beforeEach(async () => {
   await fetch(`${UPSTREAM_ORIGIN}/reset`, { method: "POST" })
 })
@@ -80,6 +107,84 @@ describe("request validation", () => {
 
     expect(response.status).toBe(400)
     expect((await responseBody(response)).error).toBe("proxy_invalid_url")
+  })
+})
+
+describe("rate limiting", () => {
+  it("keys the limit by client IP and allows requests within it", async () => {
+    const { limiter, keys } = limiterStub("allow")
+
+    const response = await mediaProxy(
+      proxyRequest(`${UPSTREAM_ORIGIN}/video.mkv`, {
+        headers: { "CF-Connecting-IP": "203.0.113.7" },
+      }),
+      { RATE_LIMITER: limiter }
+    )
+
+    expect(response.status).toBe(206)
+    expect(keys).toEqual(["203.0.113.7"])
+  })
+
+  it("treats a missing client IP as one shared key", async () => {
+    const { limiter, keys } = limiterStub("allow")
+
+    const response = await mediaProxy(
+      proxyRequest(`${UPSTREAM_ORIGIN}/video.mkv`),
+      { RATE_LIMITER: limiter }
+    )
+
+    expect(response.status).toBe(206)
+    expect(keys).toEqual(["unknown"])
+  })
+
+  it("returns 429 with Retry-After without reaching the upstream", async () => {
+    const { limiter, keys } = limiterStub("deny")
+
+    const response = await mediaProxy(
+      proxyRequest(`${UPSTREAM_ORIGIN}/video.mkv`),
+      { RATE_LIMITER: limiter }
+    )
+
+    expect(response.status).toBe(429)
+    expect(response.headers.get("Retry-After")).toBe("60")
+    expect((await responseBody(response)).error).toBe("proxy_rate_limited")
+    expect(keys).toHaveLength(1)
+    expect(await recordedUpstreamRequests()).toEqual([])
+  })
+
+  it("fails open when the limiter errors", async () => {
+    const { limiter, keys } = limiterStub("fail")
+
+    const response = await mediaProxy(
+      proxyRequest(`${UPSTREAM_ORIGIN}/video.mkv`),
+      { RATE_LIMITER: limiter }
+    )
+
+    expect(response.status).toBe(206)
+    expect(keys).toHaveLength(1)
+  })
+
+  it("skips limiting when the binding is absent", async () => {
+    const response = await mediaProxy(
+      proxyRequest(`${UPSTREAM_ORIGIN}/video.mkv`)
+    )
+
+    expect(response.status).toBe(206)
+  })
+
+  it("does not count preflights or refused methods", async () => {
+    const { limiter, keys } = limiterStub("allow")
+
+    await mediaProxy(
+      new Request(`${PROXY_ORIGIN}/api/media-proxy`, { method: "OPTIONS" }),
+      { RATE_LIMITER: limiter }
+    )
+    await mediaProxy(
+      new Request(`${PROXY_ORIGIN}/api/media-proxy?url=x`, { method: "POST" }),
+      { RATE_LIMITER: limiter }
+    )
+
+    expect(keys).toEqual([])
   })
 })
 

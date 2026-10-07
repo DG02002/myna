@@ -15,7 +15,10 @@ const appFetch = createStartHandler(defaultStreamHandler)
 export default createServerEntry({
   fetch: async (request, ...rest) => {
     if (new URL(request.url).pathname === MEDIA_PROXY_PATH) {
-      return mediaProxy(request)
+      // SAFETY: the runtime calls fetch(request, env, ctx) positionally,
+      // but TanStack's RequestHandler type only declares (request, opts);
+      // the first rest argument at runtime is the Worker env.
+      return mediaProxy(request, rest[0] as Cloudflare.Env | undefined)
     }
 
     return appFetch(request, ...rest)

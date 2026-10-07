@@ -10,6 +10,21 @@
 		"nodejs_compat"
 	],
 	"main": "./src/worker.ts",
+	"ratelimits": [
+		{
+			// namespace_id is self-chosen and unique per Cloudflare account;
+			// bindings sharing an id share counters. 600 requests per minute
+			// per client IP sits far above legitimate range-streaming playback
+			// (a seek burst is ~12 requests, sustained reads ~1-2 per second)
+			// while capping relay abuse of the open proxy.
+			"name": "RATE_LIMITER",
+			"namespace_id": "1001",
+			"simple": {
+				"limit": 600,
+				"period": 60
+			}
+		}
+	],
 	"observability": {
 		"enabled": true
 	},
