@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { mediaProxy } from "./handler"
 
@@ -352,5 +352,135 @@ describe("body streaming", () => {
     )
 
     expect(response.headers.get("Server-Timing")).toMatch(/^upstream;dur=/)
+  })
+})
+
+describe("decision logging", () => {
+  interface DecisionEntry {
+    source: string
+    status: number
+    method: string
+    host: string | null
+    path: string | null
+    outcome: string
+    redirectHops: number
+  }
+
+  function decisionLogs(spy: ReturnType<typeof vi.spyOn>): DecisionEntry[] {
+    const entries: DecisionEntry[] = []
+
+    for (const call of spy.mock.calls) {
+      // SAFETY: the media proxy logs JSON.stringify output whose shape is
+      // the handler's own ProxyRun plus source and status fields.
+      const entry = JSON.parse(call[0]) as DecisionEntry
+
+      if (entry.source === "media-proxy") {
+        entries.push(entry)
+      }
+    }
+
+    return entries
+  }
+
+  it("logs one decision per forwarded request without the query string", async () => {
+    const log = vi.spyOn(console, "log")
+
+    try {
+      const response = await mediaProxy(
+        proxyRequest(
+          `${UPSTREAM_ORIGIN}/video.mkv?token=signed-secret&expiry=42`
+        )
+      )
+
+      expect(response.status).toBe(206)
+
+      const entries = decisionLogs(log)
+
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toMatchObject({
+        source: "media-proxy",
+        status: 206,
+        method: "GET",
+        host: "upstream.test",
+        path: "/video.mkv",
+        outcome: "forwarded",
+      })
+
+      expect(log.mock.calls[0]?.[0]).not.toContain("token")
+      expect(log.mock.calls[0]?.[0]).not.toContain("?")
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it("counts followed redirect hops", async () => {
+    const log = vi.spyOn(console, "log")
+
+    try {
+      const response = await mediaProxy(
+        proxyRequest(redirectUrl(`${UPSTREAM_ORIGIN}/video.mkv`))
+      )
+
+      expect(response.status).toBe(206)
+      expect(decisionLogs(log)[0]?.redirectHops).toBe(1)
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it("logs the rejected destination itself, still without its query", async () => {
+    const log = vi.spyOn(console, "log")
+
+    try {
+      const response = await mediaProxy(
+        proxyRequest("https://169.254.169.254/latest/meta-data?token=secret")
+      )
+
+      expect(response.status).toBe(403)
+
+      const entries = decisionLogs(log)
+
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toMatchObject({
+        status: 403,
+        host: "169.254.169.254",
+        path: "/latest/meta-data",
+        outcome: "proxy_forbidden_destination",
+      })
+
+      expect(log.mock.calls[0]?.[0]).not.toContain("token")
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it("logs rate limited and preflight decisions", async () => {
+    const log = vi.spyOn(console, "log")
+
+    try {
+      const { limiter } = limiterStub("deny")
+
+      const limited = await mediaProxy(
+        proxyRequest(`${UPSTREAM_ORIGIN}/video.mkv`),
+        { RATE_LIMITER: limiter }
+      )
+
+      expect(limited.status).toBe(429)
+
+      const preflight = await mediaProxy(
+        new Request(`${PROXY_ORIGIN}/api/media-proxy`, { method: "OPTIONS" })
+      )
+
+      expect(preflight.status).toBe(204)
+
+      const entries = decisionLogs(log)
+
+      expect(entries.map((entry) => entry.outcome)).toEqual([
+        "proxy_rate_limited",
+        "preflight",
+      ])
+    } finally {
+      log.mockRestore()
+    }
   })
 })
