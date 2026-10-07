@@ -1,3 +1,5 @@
+import type { HlsJsAdapter } from "@videojs/hlsjs-video"
+import type { HlsJsVideo } from "@videojs/react/media/hlsjs-video"
 import { VideoPlayer, Video } from "@videojs/react/video"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
@@ -11,9 +13,11 @@ import type {
   EngineInit,
   MediabunnyEngine,
 } from "#/media/engines/mediabunny-engine"
-import type { PlaybackSource } from "#/media/models/source"
+import { isHlsUrl, type PlaybackSource } from "#/media/models/source"
 import { probeSource, type ProbeResult } from "#/media/probe/metadata-probe"
 import { probeTrackLabel } from "#/media/probe/track-labels"
+
+type HlsJsVideoComponent = typeof HlsJsVideo
 
 export type PlaybackEngineMode = "native" | "mediabunny"
 
@@ -52,13 +56,20 @@ export function PlaybackStage({
     string | null
   >(null)
 
-  const [probeState, setProbeState] = useState<ProbeState>({
-    status: "loading",
-  })
+  // The probe opens containers; a playlist is not one, and fetching it just
+  // to fail would waste a round trip against a signed URL. The stage is
+  // keyed by source URL, so the source kind never changes within a mount.
+  const hlsSource = isHlsUrl(source.url)
 
-  const nativeMediaRef = useRef<HTMLVideoElement | null>(null)
+  const [probeState, setProbeState] = useState<ProbeState>(() =>
+    hlsSource ? { status: "failed" } : { status: "loading" }
+  )
 
   useEffect(() => {
+    if (hlsSource) {
+      return undefined
+    }
+
     const controller = new AbortController()
 
     probeSource(source, controller.signal)
@@ -73,7 +84,9 @@ export function PlaybackStage({
       })
 
     return () => controller.abort()
-  }, [source])
+  }, [source, hlsSource])
+
+  const nativeMediaRef = useRef<HTMLVideoElement | null>(null)
 
   useEffect(() => {
     onProbe(probeState)
@@ -84,8 +97,10 @@ export function PlaybackStage({
   }, [mode, onModeChange])
 
   // Native sources load after mount so startup errors reach player state.
+  // HLS sources are owned by the HlsJsVideo adapter, which manages the
+  // element's source itself.
   useEffect(() => {
-    if (mode !== "native") {
+    if (mode !== "native" || hlsSource) {
       return
     }
 
@@ -95,7 +110,7 @@ export function PlaybackStage({
       element.src = source.url
       element.load()
     }
-  }, [mode, source.url])
+  }, [mode, source.url, hlsSource])
 
   const audioTracks = useMemo(() => {
     if (probeState.status !== "ready") {
@@ -169,12 +184,15 @@ export function PlaybackStage({
   )
 
   const onNativeError = useCallback(() => {
-    if (mode !== "native" || looksLikeHls(source.url)) {
+    // HLS failures stay in the video.js pipeline (the error dialog handles
+    // them); the mediabunny engine cannot demux playlists, so migrating a
+    // playlist source there would only produce a second failure.
+    if (mode !== "native" || hlsSource) {
       return
     }
 
     migrateToEngine(effectiveSelectedId, nativeMediaRef.current)
-  }, [effectiveSelectedId, mode, migrateToEngine, source.url])
+  }, [effectiveSelectedId, hlsSource, mode, migrateToEngine])
 
   const engineInit = useMemo<EngineInit>(
     () => ({
@@ -203,12 +221,20 @@ export function PlaybackStage({
       {mode === "native" ? (
         <VideoPlayer key="native">
           <VideoSkin className="aspect-video w-full">
-            <Video
-              ref={nativeMediaRef}
-              playsInline
-              preload="metadata"
-              onError={onNativeError}
-            />
+            {hlsSource ? (
+              <LazyHlsVideo
+                sourceUrl={source.url}
+                videoRef={nativeMediaRef}
+                onError={onNativeError}
+              />
+            ) : (
+              <Video
+                ref={nativeMediaRef}
+                playsInline
+                preload="metadata"
+                onError={onNativeError}
+              />
+            )}
           </VideoSkin>
         </VideoPlayer>
       ) : (
@@ -222,10 +248,66 @@ export function PlaybackStage({
   )
 }
 
-function looksLikeHls(url: string): boolean {
-  try {
-    return new URL(url).pathname.toLowerCase().endsWith(".m3u8")
-  } catch {
-    return false
+// HLS media element, loaded on demand so hls.js never downloads for a
+// progressive source. The component mounts first and the source is assigned
+// afterwards: assigning via props during render starts loading before the
+// adapter has attached its media element, and fatal manifest errors are
+// dropped in that window — a dead link then spins forever instead of
+// reaching the error dialog.
+//
+// No preferPlayback and no crossOrigin: hls.js over MSE wherever MSE exists
+// (renditions and quality selection need it), platform HLS only where MSE is
+// unavailable (iOS Safari), and crossOrigin breaks cross-origin native
+// playback.
+function LazyHlsVideo({
+  sourceUrl,
+  videoRef,
+  onError,
+}: {
+  sourceUrl: string
+  videoRef: React.RefObject<HTMLVideoElement | null>
+  onError: () => void
+}) {
+  const [videoComponent, setVideoComponent] =
+    useState<HlsJsVideoComponent | null>(null)
+
+  const adapterRef = useRef<HlsJsAdapter | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    void import("@videojs/react/media/hlsjs-video").then((module) => {
+      if (!cancelled) {
+        setVideoComponent(() => module.HlsJsVideo)
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Runs after the video component below has mounted and its adapter has
+  // attached, so loading starts against an attached element.
+  useEffect(() => {
+    if (videoComponent !== null && adapterRef.current !== null) {
+      adapterRef.current.source = { src: sourceUrl }
+    }
+  }, [videoComponent, sourceUrl])
+
+  if (videoComponent === null) {
+    return null
   }
+
+  const VideoElement = videoComponent
+
+  return (
+    <VideoElement
+      ref={videoRef}
+      mediaRef={adapterRef}
+      playsInline
+      preload="metadata"
+      onError={onError}
+    />
+  )
 }

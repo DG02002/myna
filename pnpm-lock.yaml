@@ -38,9 +38,12 @@ importers:
       '@videojs/core':
         specifier: 10.0.1
         version: 10.0.1(react@19.3.0)
+      '@videojs/hlsjs-video':
+        specifier: ^10.0.1
+        version: 10.0.1
       '@videojs/react':
         specifier: 10.0.1
-        version: 10.0.1(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+        version: 10.0.1(@videojs/hlsjs-video@10.0.1)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -3139,6 +3142,9 @@ packages:
   '@videojs/core@10.0.1':
     resolution: {integrity: sha512-N+f41wgFcmpe0QUhO0Q9sFHpMxKvr38ojkX5FlxAo3LKDAo2UrG2KIeklte+1VVae3oaJfP6J/KYtrRRObRxxw==}
 
+  '@videojs/hlsjs-video@10.0.1':
+    resolution: {integrity: sha512-7Om99Vxsh7JYAVf04QO4SKgkIE2jrZ8c3KS5BtdQRqZaFYM5uWU9vubw3vwerI5nsrosg1KXcuzS5TGEUW4ToQ==}
+
   '@videojs/media@10.0.1':
     resolution: {integrity: sha512-hMC2aS/8PovwJBi8y2qShC/amYfH6SBce7SZAM54qzRq8hl4FwWGFeUMMmXp8x4agRxLuCSqGqZg/EoGH2I5mQ==}
 
@@ -3917,6 +3923,9 @@ packages:
   hasown@2.0.4:
     resolution: {integrity: sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==}
     engines: {node: '>= 0.4'}
+
+  hls.js@1.6.7:
+    resolution: {integrity: sha512-QW2fnwDGKGc9DwQUGLbmMOz8G48UZK7PVNJPcOUql1b8jubKx4/eMHNP5mGqr6tYlJNDG1g10Lx2U/qPzL6zwQ==}
 
   hono@4.13.11:
     resolution: {integrity: sha512-/SMX/RQNJn7oNmFwH6DtwDqcrzZU2otm1FD6OJe2cWF6cfy/F8hq0XVBv7xW3FTJshRQwuBnXHDq2kNsdZnshg==}
@@ -8048,6 +8057,13 @@ snapshots:
       - '@videojs/element'
       - react
 
+  '@videojs/hlsjs-video@10.0.1':
+    dependencies:
+      '@videojs/media': 10.0.1
+      '@videojs/native-hls-video': 10.0.1
+      '@videojs/utils': 10.0.1
+      hls.js: 1.6.7
+
   '@videojs/media@10.0.1':
     dependencies:
       '@videojs/utils': 10.0.1
@@ -8057,7 +8073,7 @@ snapshots:
       '@videojs/media': 10.0.1
       '@videojs/utils': 10.0.1
 
-  '@videojs/react@10.0.1(react-dom@19.3.0(react@19.3.0))(react@19.3.0)':
+  '@videojs/react@10.0.1(@videojs/hlsjs-video@10.0.1)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)':
     dependencies:
       '@videojs/core': 10.0.1(react@19.3.0)
       '@videojs/media': 10.0.1
@@ -8068,6 +8084,8 @@ snapshots:
       react: 19.3.0
       react-compiler-runtime: 1.0.0(react@19.3.0)
       react-dom: 19.3.0(react@19.3.0)
+    optionalDependencies:
+      '@videojs/hlsjs-video': 10.0.1
     transitivePeerDependencies:
       - '@videojs/element'
 
@@ -8828,6 +8846,8 @@ snapshots:
   hasown@2.0.4:
     dependencies:
       function-bind: 1.1.2
+
+  hls.js@1.6.7: {}
 
   hono@4.13.11: {}
 

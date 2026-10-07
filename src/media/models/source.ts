@@ -7,6 +7,17 @@ interface DirectSource {
 
 export type PlaybackSource = DirectSource
 
+// Playlists ride the HLS pipeline (platform HLS first, hls.js over MSE
+// second); the mediabunny engine cannot demux them. Signed URLs may hide the
+// extension — those take the progressive path and surface through its errors.
+export function isHlsUrl(url: string): boolean {
+  try {
+    return new URL(url).pathname.toLowerCase().endsWith(".m3u8")
+  } catch {
+    return false
+  }
+}
+
 export type SourceParseResult =
   | { source: PlaybackSource }
   | { failure: Extract<PlaybackFailure, { kind: "invalid-media-url" }> }

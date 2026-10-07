@@ -54,6 +54,7 @@ minimumReleaseAgeExclude:
   - '@videojs/spf@10.0.1'
   - '@videojs/store@10.0.1'
   - '@videojs/utils@10.0.1'
+  - '@videojs/hlsjs-video@10.0.1'
 minimumReleaseAgeIgnoreMissingTime: false
 minimumReleaseAgeStrict: false
 

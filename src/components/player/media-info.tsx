@@ -3,6 +3,7 @@ import type {
   PlaybackEngineMode,
   ProbeState,
 } from "#/components/player/playback-stage"
+import { isHlsUrl } from "#/media/models/source"
 import { durationLabel, probeTrackLabel } from "#/media/probe/track-labels"
 
 export function MediaInfo({
@@ -17,7 +18,11 @@ export function MediaInfo({
   return (
     <section className="text-muted-foreground space-y-1.5 text-sm">
       {import.meta.env.DEV ? (
-        <EngineBadge probeState={probeState} engineMode={engineMode} />
+        <EngineBadge
+          sourceUrl={sourceUrl}
+          probeState={probeState}
+          engineMode={engineMode}
+        />
       ) : null}
       <NetworkInfo sourceUrl={sourceUrl} engineMode={engineMode} />
       {probeState.status === "loading" ? (
@@ -55,14 +60,26 @@ export function MediaInfo({
 }
 
 function EngineBadge({
+  sourceUrl,
   probeState,
   engineMode,
 }: {
+  sourceUrl: string
   probeState: ProbeState
   engineMode: PlaybackEngineMode
 }) {
-  const engineLabel =
-    engineMode === "mediabunny" ? "Mediabunny+WebCodecs" : "Native"
+  // Which of the two HLS paths is active is the platform's choice (hls.js
+  // wherever MSE exists, platform HLS on MSE-less platforms); the badge
+  // says so rather than guessing.
+  let engineLabel: string
+
+  if (engineMode === "mediabunny") {
+    engineLabel = "Mediabunny+WebCodecs"
+  } else if (isHlsUrl(sourceUrl)) {
+    engineLabel = "hls.js / Native HLS"
+  } else {
+    engineLabel = "Native"
+  }
 
   const readMode =
     probeState.status === "ready"
