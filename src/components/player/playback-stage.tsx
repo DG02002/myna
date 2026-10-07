@@ -13,11 +13,29 @@ import type {
   EngineInit,
   MediabunnyEngine,
 } from "#/media/engines/mediabunny-engine"
+import { MEDIA_ERR_SRC_NOT_SUPPORTED } from "#/media/models/media-errors"
 import { isHlsUrl, type PlaybackSource } from "#/media/models/source"
 import { probeSource, type ProbeResult } from "#/media/probe/metadata-probe"
 import { probeTrackLabel } from "#/media/probe/track-labels"
 
 type HlsJsVideoComponent = typeof HlsJsVideo
+
+// Apple's browsers are the one family where the plan's "native HLS" path is
+// the first-class pipeline; they are identified by a capability no other
+// browser exposes — the webkit presentation-mode (PiP) API on video
+// elements — rather than a user-agent string. Everywhere else hls.js over
+// MSE plays, which the quality menu needs (renditions exist only on the MSE
+// engine) and which sidesteps Chromium's own new HLS support that still
+// rejects some streams outright (measured, October 2026).
+let platformHlsHint: boolean | undefined
+
+function prefersPlatformHls(): boolean {
+  platformHlsHint ??=
+    typeof HTMLVideoElement !== "undefined" &&
+    "webkitPresentationMode" in HTMLVideoElement.prototype
+
+  return platformHlsHint
+}
 
 export type PlaybackEngineMode = "native" | "mediabunny"
 
@@ -255,10 +273,11 @@ export function PlaybackStage({
 // dropped in that window — a dead link then spins forever instead of
 // reaching the error dialog.
 //
-// No preferPlayback and no crossOrigin: hls.js over MSE wherever MSE exists
-// (renditions and quality selection need it), platform HLS only where MSE is
-// unavailable (iOS Safari), and crossOrigin breaks cross-origin native
-// playback.
+// Engine routing: Apple platforms play through their own HLS pipeline
+// (prefersPlatformHls); everyone else through hls.js over MSE, which the
+// quality menu needs. A manifest the platform pipeline rejects outright gets
+// one rebuild through hls.js; from then on failures belong to the error
+// dialog. No crossOrigin — it breaks cross-origin native playback.
 function LazyHlsVideo({
   sourceUrl,
   videoRef,
@@ -270,6 +289,8 @@ function LazyHlsVideo({
 }) {
   const [videoComponent, setVideoComponent] =
     useState<HlsJsVideoComponent | null>(null)
+
+  const [platformHlsRejected, setPlatformHlsRejected] = useState(false)
 
   const adapterRef = useRef<HlsJsAdapter | null>(null)
 
@@ -290,10 +311,42 @@ function LazyHlsVideo({
   // Runs after the video component below has mounted and its adapter has
   // attached, so loading starts against an attached element.
   useEffect(() => {
-    if (videoComponent !== null && adapterRef.current !== null) {
-      adapterRef.current.source = { src: sourceUrl }
+    const adapter = adapterRef.current
+
+    if (videoComponent === null || adapter === null) {
+      return undefined
     }
-  }, [videoComponent, sourceUrl])
+
+    const usePlatformHls = prefersPlatformHls() && !platformHlsRejected
+
+    // The adapter re-dispatches the element's error events on itself (the
+    // element's own are stopped at the element), which is the only reliable
+    // signal a native-HLS failure happened. The listener parameter matches
+    // the adapter's EventLike shape structurally — @videojs/media is not a
+    // direct dependency to import the type from.
+    const onAdapterError = (event: {
+      readonly type: string
+      readonly timeStamp: number
+    }) => {
+      if (
+        usePlatformHls &&
+        event instanceof ErrorEvent &&
+        event.error?.code === MEDIA_ERR_SRC_NOT_SUPPORTED
+      ) {
+        setPlatformHlsRejected(true)
+      }
+    }
+
+    adapter.addEventListener("error", onAdapterError)
+
+    adapter.source = usePlatformHls
+      ? { src: sourceUrl, preferPlayback: "native" }
+      : { src: sourceUrl }
+
+    return () => {
+      adapter.removeEventListener("error", onAdapterError)
+    }
+  }, [videoComponent, sourceUrl, platformHlsRejected])
 
   if (videoComponent === null) {
     return null

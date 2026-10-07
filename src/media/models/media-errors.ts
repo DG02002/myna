@@ -79,7 +79,7 @@ const MEDIA_ERR_NETWORK = 2
 
 const MEDIA_ERR_DECODE = 3
 
-const MEDIA_ERR_SRC_NOT_SUPPORTED = 4
+export const MEDIA_ERR_SRC_NOT_SUPPORTED = 4
 
 export function nativeMediaErrorCodeToFailure(code: number): PlaybackFailure {
   switch (code) {
