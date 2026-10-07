@@ -1,0 +1,77 @@
+import { useId, useState, type FormEvent } from "react"
+
+import { Button } from "#/components/ui/button"
+import { Input } from "#/components/ui/input"
+import type { ExternalSubtitleTrack } from "#/media/subtitles"
+
+export function SubtitleControls({
+  tracks,
+  onAddSubtitle,
+  disabled = false,
+}: {
+  tracks: ExternalSubtitleTrack[]
+  onAddSubtitle: (url: string) => void
+  disabled?: boolean
+}) {
+  const inputId = useId()
+  const [url, setUrl] = useState("")
+
+  if (disabled) {
+    return null
+  }
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const value = url.trim()
+
+    if (value.length === 0) {
+      return
+    }
+
+    onAddSubtitle(value)
+    setUrl("")
+  }
+
+  return (
+    <section className="min-w-56 space-y-1.5">
+      <form className="space-y-1.5" onSubmit={submit}>
+        <label className="text-sm font-medium" htmlFor={inputId}>
+          Add subtitles
+        </label>
+        <div className="flex gap-2">
+          <Input
+            id={inputId}
+            type="url"
+            required
+            value={url}
+            onChange={(event) => setUrl(event.currentTarget.value)}
+            placeholder="https://example.com/subtitles.vtt"
+            aria-label="Subtitle file URL"
+          />
+          <Button type="submit">Add</Button>
+        </div>
+      </form>
+      <div className="space-y-1" aria-live="polite">
+        {tracks.map((track) => {
+          if (track.status === "loading") {
+            return (
+              <p className="text-muted-foreground text-xs" key={track.id}>
+                Loading {track.label}…
+              </p>
+            )
+          }
+
+          if (track.status === "failed") {
+            return (
+              <p className="text-destructive text-xs" key={track.id}>
+                Could not load {track.label}.
+              </p>
+            )
+          }
+
+          return null
+        })}
+      </div>
+    </section>
+  )
+}

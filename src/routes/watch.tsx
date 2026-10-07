@@ -7,6 +7,7 @@ import {
   type PlaybackEngineMode,
   type ProbeState,
 } from "#/components/player/playback-stage"
+import { SubtitleControls } from "#/components/player/subtitle-controls"
 import { Button } from "#/components/ui/button"
 import { loadSourceFromSession } from "#/media/models/source"
 
@@ -68,25 +69,32 @@ function WatchPage() {
         source={source}
         onProbe={onProbe}
         onModeChange={onModeChange}
+        renderDetails={({ subtitleTracks, addSubtitle, canAddSubtitles }) => (
+          <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+            <p className="text-muted-foreground min-w-0 flex-1 truncate text-sm">
+              <bdi>{safeHost(source.url)}</bdi>
+              <Link
+                to="/"
+                className="text-foreground underline underline-offset-4 hover:opacity-80"
+              >
+                {" "}
+                Choose another link
+              </Link>
+            </p>
+            <SubtitleControls
+              tracks={subtitleTracks}
+              onAddSubtitle={addSubtitle}
+              disabled={!canAddSubtitles}
+            />
+            <MediaInfo
+              key={source.url}
+              sourceUrl={source.url}
+              probeState={probeState}
+              engineMode={engineMode}
+            />
+          </div>
+        )}
       />
-      <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-2">
-        <p className="text-muted-foreground min-w-0 flex-1 truncate text-sm">
-          <bdi>{safeHost(source.url)}</bdi>
-          <Link
-            to="/"
-            className="text-foreground underline underline-offset-4 hover:opacity-80"
-          >
-            {" "}
-            Choose another link
-          </Link>
-        </p>
-        <MediaInfo
-          key={source.url}
-          sourceUrl={source.url}
-          probeState={probeState}
-          engineMode={engineMode}
-        />
-      </div>
     </main>
   )
 }
