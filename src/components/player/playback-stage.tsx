@@ -1,14 +1,24 @@
 import type { HlsJsAdapter } from "@videojs/hlsjs-video"
 import type { HlsJsVideo } from "@videojs/react/media/hlsjs-video"
 import { VideoPlayer, Video } from "@videojs/react/video"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react"
 
 import {
   AudioTracksContext,
   type AudioTracksValue,
 } from "#/components/player/audio-tracks-context"
+import { useExternalSubtitles } from "#/components/player/external-subtitles"
 import { MediabunnyVideo } from "#/components/player/mediabunny-video"
+import { SubtitleOverlay } from "#/components/player/subtitle-overlay"
 import { VideoSkin } from "#/components/videojs/video/skin"
+import type { MediabunnyMediaAdapter } from "#/media/engines/mediabunny-adapter"
 import type {
   EngineInit,
   MediabunnyEngine,
@@ -17,6 +27,7 @@ import { MEDIA_ERR_SRC_NOT_SUPPORTED } from "#/media/models/media-errors"
 import { isHlsUrl, type PlaybackSource } from "#/media/models/source"
 import { probeSource, type ProbeResult } from "#/media/probe/metadata-probe"
 import { probeTrackLabel } from "#/media/probe/track-labels"
+import type { ExternalSubtitleTrack } from "#/media/subtitles"
 
 type HlsJsVideoComponent = typeof HlsJsVideo
 
@@ -51,6 +62,13 @@ interface MigrationSnapshot {
   muted: boolean
   playbackRate: number
   audioTrackId: string | null
+  subtitleTrackId: string | null
+}
+
+export interface PlaybackStageDetails {
+  subtitleTracks: ExternalSubtitleTrack[]
+  addSubtitle: (url: string) => void
+  canAddSubtitles: boolean
 }
 
 // The native engine wins until it cannot do the job: a fatal native error,
@@ -61,14 +79,17 @@ export function PlaybackStage({
   source,
   onProbe,
   onModeChange,
+  renderDetails,
 }: {
   source: PlaybackSource
   onProbe: (state: ProbeState) => void
   onModeChange: (mode: PlaybackEngineMode) => void
+  renderDetails?: (details: PlaybackStageDetails) => ReactNode
 }) {
   const [mode, setMode] = useState<PlaybackEngineMode>("native")
   const [snapshot, setSnapshot] = useState<MigrationSnapshot | null>(null)
   const [engine, setEngine] = useState<MediabunnyEngine | null>(null)
+  const [adapter, setAdapter] = useState<MediabunnyMediaAdapter | null>(null)
 
   const [selectedAudioTrackId, setSelectedAudioTrackId] = useState<
     string | null
@@ -106,13 +127,20 @@ export function PlaybackStage({
 
   const nativeMediaRef = useRef<HTMLVideoElement | null>(null)
 
-  useEffect(() => {
-    onProbe(probeState)
-  }, [probeState, onProbe])
+  const {
+    tracks: subtitleTracks,
+    selectedId: selectedSubtitleId,
+    addSubtitle,
+    restoreSelection: restoreSubtitleSelection,
+  } = useExternalSubtitles({
+    useAdvancedEngine: mode === "mediabunny",
+    nativeMediaRef,
+    adapter,
+  })
 
   useEffect(() => {
-    onModeChange(mode)
-  }, [mode, onModeChange])
+    onProbe(probeState)
+  }, [onProbe, probeState])
 
   // Native sources load after mount so startup errors reach player state.
   // HLS sources are owned by the HlsJsVideo adapter, which manages the
@@ -147,8 +175,7 @@ export function PlaybackStage({
       }))
   }, [probeState])
 
-  const defaultAudioTrackId = audioTracks[0]?.id ?? null
-  const effectiveSelectedId = selectedAudioTrackId ?? defaultAudioTrackId
+  const effectiveSelectedId = selectedAudioTrackId ?? audioTracks[0]?.id ?? null
 
   const migrateToEngine = useCallback(
     (nextAudioTrackId: string | null, element: HTMLVideoElement | null) => {
@@ -159,14 +186,16 @@ export function PlaybackStage({
         muted: element?.muted ?? false,
         playbackRate: element?.playbackRate ?? 1,
         audioTrackId: nextAudioTrackId,
+        subtitleTrackId: selectedSubtitleId,
       })
       setMode("mediabunny")
+      onModeChange("mediabunny")
 
       if (nextAudioTrackId !== null) {
         setSelectedAudioTrackId(nextAudioTrackId)
       }
     },
-    []
+    [onModeChange, selectedSubtitleId]
   )
 
   const selectTrack = useCallback(
@@ -236,32 +265,58 @@ export function PlaybackStage({
 
   return (
     <AudioTracksContext.Provider value={tracksValue}>
-      {mode === "native" ? (
-        <VideoPlayer key="native">
-          <VideoSkin className="aspect-video w-full">
-            {hlsSource ? (
-              <LazyHlsVideo
-                sourceUrl={source.url}
-                videoRef={nativeMediaRef}
-                onError={onNativeError}
+      <>
+        {mode === "native" ? (
+          <VideoPlayer key="native">
+            <VideoSkin className="aspect-video w-full">
+              {hlsSource ? (
+                <LazyHlsVideo
+                  sourceUrl={source.url}
+                  videoRef={nativeMediaRef}
+                  onError={onNativeError}
+                />
+              ) : (
+                <Video
+                  ref={nativeMediaRef}
+                  playsInline
+                  preload="metadata"
+                  onError={onNativeError}
+                />
+              )}
+            </VideoSkin>
+          </VideoPlayer>
+        ) : (
+          <VideoPlayer key="mediabunny">
+            <VideoSkin className="aspect-video w-full">
+              <MediabunnyVideo
+                init={engineInit}
+                onEngine={setEngine}
+                onAdapter={(nextAdapter) => {
+                  if (nextAdapter !== null && snapshot !== null) {
+                    restoreSubtitleSelection(snapshot.subtitleTrackId)
+                  }
+
+                  setAdapter(nextAdapter)
+                }}
               />
-            ) : (
-              <Video
-                ref={nativeMediaRef}
-                playsInline
-                preload="metadata"
-                onError={onNativeError}
-              />
-            )}
-          </VideoSkin>
-        </VideoPlayer>
-      ) : (
-        <VideoPlayer key="mediabunny">
-          <VideoSkin className="aspect-video w-full">
-            <MediabunnyVideo init={engineInit} onEngine={setEngine} />
-          </VideoSkin>
-        </VideoPlayer>
-      )}
+              {adapter !== null && engine !== null ? (
+                <SubtitleOverlay
+                  adapter={adapter}
+                  engine={engine}
+                  track={subtitleTracks.find(
+                    (track) => track.id === selectedSubtitleId
+                  )}
+                />
+              ) : null}
+            </VideoSkin>
+          </VideoPlayer>
+        )}
+        {renderDetails?.({
+          subtitleTracks,
+          addSubtitle,
+          canAddSubtitles: !hlsSource,
+        })}
+      </>
     </AudioTracksContext.Provider>
   )
 }

@@ -25,6 +25,7 @@ const EMPTY_TIME_RANGES: StaticTimeRanges = {
 export class MediabunnyMediaAdapter extends EventTarget {
   private readyStateValue: number = HAVE_NOTHING
   private errorValue: { code: number; message: string } | null = null
+  private readonly textTrackHost = document.createElement("video")
 
   constructor(
     private readonly engine: MediabunnyEngine,
@@ -139,6 +140,14 @@ export class MediabunnyMediaAdapter extends EventTarget {
 
   get currentSrc(): string {
     return this.sourceUrl
+  }
+
+  get textTracks(): TextTrackList {
+    return this.textTrackHost.textTracks
+  }
+
+  addSubtitleTrack(label: string, language: string): TextTrack {
+    return this.textTrackHost.addTextTrack("subtitles", label, language)
   }
 
   get readyState(): number {
