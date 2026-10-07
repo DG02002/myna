@@ -75,12 +75,6 @@ function expandIPv6(host: string): string[] {
 }
 
 function isPrivateIPv6(host: string): boolean {
-  if (host.startsWith("::ffff:")) {
-    const mapped = host.slice(7)
-
-    return mapped.includes(".") ? isPrivateIPv4(mapped) : isPrivateIPv6(mapped)
-  }
-
   if (host.includes("%")) {
     // Zone index (fe80::1%eth0) is always link-local scoped.
     return host.toLowerCase().startsWith("fe80:")
@@ -92,16 +86,52 @@ function isPrivateIPv6(host: string): boolean {
     return false
   }
 
-  const first = Number.parseInt(groups[0], 16)
+  const [
+    firstGroup,
+    secondGroup,
+    thirdGroup,
+    fourthGroup,
+    fifthGroup,
+    sixthGroup,
+    seventhGroup,
+    eighthGroup,
+  ] = groups
 
-  // ::/128 unspecified, ::1/128 loopback, fc00::/7 unique local,
-  // fe80::/10 link-local, ff00::/8 multicast.
-  if (groups.every((group) => group === "0")) {
-    return true
+  const leadingGroups = [
+    firstGroup,
+    secondGroup,
+    thirdGroup,
+    fourthGroup,
+    fifthGroup,
+  ]
+
+  // URL hostnames normalize IPv4-mapped addresses to hex groups
+  // (::ffff:a01:203 for 10.1.2.3), so decode the mapped IPv4 from the
+  // final two groups and apply the IPv4 rules to it.
+  if (
+    leadingGroups.every((group) => group === "0") &&
+    sixthGroup?.toLowerCase() === "ffff"
+  ) {
+    const high = Number.parseInt(seventhGroup ?? "0", 16)
+    const low = Number.parseInt(eighthGroup ?? "0", 16)
+
+    return isPrivateIPv4(
+      `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`
+    )
   }
 
+  // ::/128 unspecified and ::1/128 loopback carry zeros in every group but
+  // the last; the loopback's final group is 1.
+  if (
+    [...leadingGroups, sixthGroup, seventhGroup].every((group) => group === "0")
+  ) {
+    return Number.parseInt(eighthGroup ?? "0", 16) <= 1
+  }
+
+  const first = Number.parseInt(firstGroup ?? "0", 16)
+
+  // fc00::/7 unique local, fe80::/10 link-local, ff00::/8 multicast.
   return (
-    first === 1 ||
     (first & 0xfe00) === 0xfc00 ||
     (first & 0xffc0) === 0xfe80 ||
     (first & 0xff00) === 0xff00
