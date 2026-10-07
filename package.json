@@ -29,6 +29,7 @@
     "@hugeicons/core-free-icons": "^4.3.5",
     "@hugeicons/react": "^1.1.10",
     "@mediabunny/ac3": "^1.61.0",
+    "@mediabunny/dts": "^1.61.0",
     "@tanstack/react-devtools": "0.10.13",
     "@tanstack/react-router": "1.170.41",
     "@tanstack/react-router-devtools": "1.167.2",

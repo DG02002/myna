@@ -151,6 +151,12 @@ async function ensureAudioDecoderRegistered(
 
     registerAc3Decoder()
   }
+
+  if (codec?.startsWith("dts")) {
+    const { registerDtsDecoder } = await import("@mediabunny/dts")
+
+    registerDtsDecoder()
+  }
 }
 
 export class MediabunnyEngine {
