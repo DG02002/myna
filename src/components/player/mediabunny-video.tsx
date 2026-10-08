@@ -11,6 +11,7 @@ export interface MediabunnyVideoProps {
   init: EngineInit
   onEngine: (engine: MediabunnyEngine) => void
   onAdapter: (adapter: MediabunnyMediaAdapter | null) => void
+  onSelectedAudioTrackId: (id: string | null) => void
 }
 
 // Advanced-engine media component: renders the decoded-video canvas and
@@ -20,11 +21,13 @@ export function MediabunnyVideo({
   init,
   onEngine,
   onAdapter,
+  onSelectedAudioTrackId,
 }: MediabunnyVideoProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const attachMedia = useMediaAttach()
   const onEngineRef = useRef(onEngine)
   const onAdapterRef = useRef(onAdapter)
+  const onSelectedAudioTrackIdRef = useRef(onSelectedAudioTrackId)
 
   useEffect(() => {
     onEngineRef.current = onEngine
@@ -34,10 +37,20 @@ export function MediabunnyVideo({
     onAdapterRef.current = onAdapter
   })
 
+  useEffect(() => {
+    onSelectedAudioTrackIdRef.current = onSelectedAudioTrackId
+  })
+
   // One engine per source; `init` is memoized by the parent stage.
   useEffect(() => {
     const engine = new MediabunnyEngine(init)
     const adapter = new MediabunnyMediaAdapter(engine, init.source.url)
+
+    const unsubscribe = engine.listen((event) => {
+      if (event.type === "loaded") {
+        onSelectedAudioTrackIdRef.current(event.selectedAudioTrackId)
+      }
+    })
 
     engine.attachCanvas(canvasRef.current)
     attachMedia?.(adapter)
@@ -46,6 +59,7 @@ export function MediabunnyVideo({
     void engine.load()
 
     return () => {
+      unsubscribe()
       onAdapterRef.current(null)
       engine.dispose()
       attachMedia?.(null)

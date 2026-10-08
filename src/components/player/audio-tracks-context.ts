@@ -12,6 +12,7 @@ interface AudioTrackOption {
 export interface AudioTracksValue {
   tracks: AudioTrackOption[]
   selectedId: string | null
+  selectionLabel: string
   selectTrack: (id: string) => void
 }
 

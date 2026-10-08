@@ -18,6 +18,14 @@ export function isHlsUrl(url: string): boolean {
   }
 }
 
+export function isMatroskaUrl(url: string): boolean {
+  try {
+    return new URL(url).pathname.toLowerCase().endsWith(".mkv")
+  } catch {
+    return false
+  }
+}
+
 export type SourceParseResult =
   | { source: PlaybackSource }
   | { failure: Extract<PlaybackFailure, { kind: "invalid-media-url" }> }

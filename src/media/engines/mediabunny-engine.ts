@@ -41,6 +41,7 @@ export type EngineStateEvent =
       width: number | null
       height: number | null
       tracks: EngineTrack[]
+      selectedAudioTrackId: string | null
     }
   | { type: "timeupdate"; currentTime: number }
   | { type: "seeking" }
@@ -304,6 +305,7 @@ export class MediabunnyEngine {
       width: this.widthValue,
       height: this.heightValue,
       tracks: this.trackList(),
+      selectedAudioTrackId: this.selectedAudioTrackId,
     })
   }
 
@@ -324,9 +326,7 @@ export class MediabunnyEngine {
     this.selectedAudioTrack =
       this.audioTracks.find(
         (track) => this.trackId(track) === this.init.audioTrackId
-      ) ??
-      this.audioTracks[0] ??
-      null
+      ) ?? (await input.getPrimaryAudioTrack())
 
     if (this.selectedAudioTrack !== null) {
       await ensureAudioDecoderRegistered(this.selectedAudioTrack)

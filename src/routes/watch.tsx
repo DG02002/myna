@@ -69,7 +69,12 @@ function WatchPage() {
         source={source}
         onProbe={onProbe}
         onModeChange={onModeChange}
-        renderDetails={({ subtitleTracks, addSubtitle, canAddSubtitles }) => (
+        renderDetails={({
+          subtitleTracks,
+          addSubtitle,
+          canAddSubtitles,
+          embeddedProbeFailed,
+        }) => (
           <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
             <p className="text-muted-foreground min-w-0 flex-1 truncate text-sm">
               <bdi>{safeHost(source.url)}</bdi>
@@ -84,6 +89,7 @@ function WatchPage() {
             <SubtitleControls
               tracks={subtitleTracks}
               onAddSubtitle={addSubtitle}
+              embeddedProbeFailed={embeddedProbeFailed}
               disabled={!canAddSubtitles}
             />
             <MediaInfo

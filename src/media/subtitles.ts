@@ -14,12 +14,30 @@ export interface SubtitleCue {
   text: string
 }
 
-export interface ExternalSubtitleTrack {
+export interface SubtitleTrack {
   id: string
   label: string
   language: string
-  status: "loading" | "ready" | "failed"
+  flags?: SubtitleTrackFlags
+  source:
+    | { kind: "external" }
+    | {
+        kind: "matroska"
+        trackNumber: number
+        codecId: string
+      }
+  status: "loading" | "available" | "ready" | "failed"
   cues: SubtitleCue[]
+}
+
+export interface SubtitleTrackFlags {
+  default: boolean
+  forced: boolean
+  hearingImpaired: boolean
+  visualImpaired: boolean
+  textDescriptions: boolean
+  original: boolean
+  commentary: boolean
 }
 
 export interface SubtitleTrackName {

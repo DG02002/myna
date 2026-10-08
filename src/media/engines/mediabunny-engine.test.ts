@@ -60,15 +60,32 @@ interface TestAudioSink {
 }
 
 interface EngineInternals extends Pick<MediabunnyEngine, "dispose"> {
+  input: {
+    getPrimaryVideoTrack: () => Promise<null>
+    getAudioTracks: () => Promise<TestInputAudioTrack[]>
+    getPrimaryAudioTrack: () => Promise<TestInputAudioTrack | null>
+    getDurationFromMetadata: () => Promise<number>
+    dispose: () => void
+  } | null
+  loadTracks: () => Promise<void>
   audioContext: TestAudioContext | null
   audioSink: TestAudioSink | null
   durationValue: number
   masterGain: object | null
   playing: boolean
-  selectedAudioTrack: object | null
+  selectedAudioTrack: { type: "audio"; number: number } | null
+  tracksValue: { id: string; kind: "audio" | "video"; label: string }[]
+  notifyLoaded: () => void
   startAudio: (startTime: number) => Promise<void>
   stopAudio: () => void
   finishIfPlaybackTimeReachedEnd: (currentTime: number) => boolean
+}
+
+interface TestInputAudioTrack {
+  type: "audio"
+  number: number
+  getCodecParameterString: () => Promise<string>
+  getLanguageCode: () => Promise<string>
 }
 
 interface EngineHarness {
@@ -198,10 +215,72 @@ function createEngine(): EngineHarness {
   internals.durationValue = 60
   internals.masterGain = { connected: true }
   internals.playing = true
-  internals.selectedAudioTrack = {}
+  internals.selectedAudioTrack = { type: "audio", number: 1 }
+  internals.tracksValue = []
 
   return { engine, internals, context, nodes, queueAtCapacity, queueAdvanced }
 }
+
+void test("reports the actual audio selection after engine load", () => {
+  const harness = createEngine()
+  const track = { type: "audio" as const, number: 3 }
+  const events: unknown[] = []
+
+  harness.internals.selectedAudioTrack = track
+  harness.internals.tracksValue = [
+    { id: "audio-3", kind: "audio", label: "Audio 3" },
+  ]
+  harness.engine.listen((event) => events.push(event))
+  harness.internals.notifyLoaded()
+
+  assert.deepEqual(events, [
+    {
+      type: "loaded",
+      duration: 60,
+      width: null,
+      height: null,
+      tracks: [{ id: "audio-3", kind: "audio", label: "Audio 3" }],
+      selectedAudioTrackId: "audio-3",
+    },
+  ])
+
+  harness.engine.dispose()
+})
+
+void test("loads the file's primary audio and preserves an explicit selection", async () => {
+  const tracks: TestInputAudioTrack[] = [1, 2].map((number) => ({
+    type: "audio",
+    number,
+    getCodecParameterString: async () => "opus",
+    getLanguageCode: async () => "eng",
+  }))
+
+  for (const audioTrackId of [null, "audio-1"]) {
+    const engine = new MediabunnyEngine({
+      source: { kind: "direct", url: "https://example.invalid/video.mkv" },
+      startTime: 0,
+      autoPlay: false,
+      volume: 1,
+      muted: false,
+      playbackRate: 1,
+      audioTrackId,
+    })
+
+    const internals = accessInternals(engine)
+
+    internals.input = {
+      getPrimaryVideoTrack: async () => null,
+      getAudioTracks: async () => tracks,
+      getPrimaryAudioTrack: async () => tracks[1] ?? null,
+      getDurationFromMetadata: async () => 60,
+      dispose: () => {},
+    }
+
+    await internals.loadTracks()
+    assert.equal(engine.selectedAudioTrackId, audioTrackId ?? "audio-2")
+    engine.dispose()
+  }
+})
 
 function connectAudioRuns(
   internals: EngineInternals,

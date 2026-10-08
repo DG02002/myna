@@ -4,7 +4,7 @@ import type { MediabunnyMediaAdapter } from "#/media/engines/mediabunny-adapter"
 import type { MediabunnyEngine } from "#/media/engines/mediabunny-engine"
 import {
   subtitleCueDisplayText,
-  type ExternalSubtitleTrack,
+  type SubtitleTrack,
   type SubtitleCue,
 } from "#/media/subtitles"
 
@@ -15,7 +15,7 @@ export function SubtitleOverlay({
 }: {
   adapter: MediabunnyMediaAdapter
   engine: MediabunnyEngine
-  track: ExternalSubtitleTrack | undefined
+  track: SubtitleTrack | undefined
 }) {
   const cues = useMemo(() => {
     if (track?.status !== "ready") {

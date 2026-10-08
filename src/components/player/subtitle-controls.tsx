@@ -2,15 +2,17 @@ import { useId, useState, type FormEvent } from "react"
 
 import { Button } from "#/components/ui/button"
 import { Input } from "#/components/ui/input"
-import type { ExternalSubtitleTrack } from "#/media/subtitles"
+import type { SubtitleTrack } from "#/media/subtitles"
 
 export function SubtitleControls({
   tracks,
   onAddSubtitle,
+  embeddedProbeFailed,
   disabled = false,
 }: {
-  tracks: ExternalSubtitleTrack[]
+  tracks: SubtitleTrack[]
   onAddSubtitle: (url: string) => void
+  embeddedProbeFailed: boolean
   disabled?: boolean
 }) {
   const inputId = useId()
@@ -52,6 +54,11 @@ export function SubtitleControls({
         </div>
       </form>
       <div className="space-y-1" aria-live="polite">
+        {embeddedProbeFailed ? (
+          <p className="text-destructive text-xs">
+            Could not inspect embedded subtitles.
+          </p>
+        ) : null}
         {tracks.map((track) => {
           if (track.status === "loading") {
             return (

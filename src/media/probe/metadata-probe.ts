@@ -16,6 +16,7 @@ export interface ProbeTrackInfo {
   languageCode: string
   name: string | null
   decodable: boolean
+  default: boolean
   displayWidth: number | null
   displayHeight: number | null
   channels: number | null
@@ -41,12 +42,13 @@ async function describeTrack(
     return null
   }
 
-  const [codecParameterString, languageCode, name, decodable] =
+  const [codecParameterString, languageCode, name, decodable, disposition] =
     await Promise.all([
       track.getCodecParameterString(),
       track.getLanguageCode(),
       track.getName(),
       track.canDecode(),
+      track.getDisposition(),
     ])
 
   const displayWidth =
@@ -68,6 +70,7 @@ async function describeTrack(
     languageCode,
     name,
     decodable,
+    default: disposition.default,
     displayWidth,
     displayHeight,
     channels,

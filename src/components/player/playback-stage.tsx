@@ -10,13 +10,14 @@ import {
   type ReactNode,
 } from "react"
 
+import { AssSubtitleOverlay } from "#/components/player/ass-subtitle-overlay"
 import {
   AudioTracksContext,
   type AudioTracksValue,
 } from "#/components/player/audio-tracks-context"
-import { useExternalSubtitles } from "#/components/player/external-subtitles"
 import { MediabunnyVideo } from "#/components/player/mediabunny-video"
 import { SubtitleOverlay } from "#/components/player/subtitle-overlay"
+import { useSubtitles } from "#/components/player/subtitle-tracks"
 import { VideoSkin } from "#/components/videojs/video/skin"
 import type { MediabunnyMediaAdapter } from "#/media/engines/mediabunny-adapter"
 import type {
@@ -24,10 +25,14 @@ import type {
   MediabunnyEngine,
 } from "#/media/engines/mediabunny-engine"
 import { MEDIA_ERR_SRC_NOT_SUPPORTED } from "#/media/models/media-errors"
-import { isHlsUrl, type PlaybackSource } from "#/media/models/source"
+import {
+  isHlsUrl,
+  isMatroskaUrl,
+  type PlaybackSource,
+} from "#/media/models/source"
 import { probeSource, type ProbeResult } from "#/media/probe/metadata-probe"
 import { probeTrackLabel } from "#/media/probe/track-labels"
-import type { ExternalSubtitleTrack } from "#/media/subtitles"
+import type { SubtitleTrack } from "#/media/subtitles"
 
 type HlsJsVideoComponent = typeof HlsJsVideo
 
@@ -66,9 +71,10 @@ interface MigrationSnapshot {
 }
 
 export interface PlaybackStageDetails {
-  subtitleTracks: ExternalSubtitleTrack[]
+  subtitleTracks: SubtitleTrack[]
   addSubtitle: (url: string) => void
   canAddSubtitles: boolean
+  embeddedProbeFailed: boolean
 }
 
 // The native engine wins until it cannot do the job: a fatal native error,
@@ -98,44 +104,32 @@ export function PlaybackStage({
   // The probe opens containers; a playlist is not one, and fetching it just
   // to fail would waste a round trip against a signed URL. The stage is
   // keyed by source URL, so the source kind never changes within a mount.
-  const hlsSource = isHlsUrl(source.url)
-
-  const [probeState, setProbeState] = useState<ProbeState>(() =>
-    hlsSource ? { status: "failed" } : { status: "loading" }
-  )
-
-  useEffect(() => {
-    if (hlsSource) {
-      return undefined
-    }
-
-    const controller = new AbortController()
-
-    probeSource(source, controller.signal)
-      .then((result) => {
-        setProbeState({ status: "ready", result })
-      })
-      .catch(() => {
-        // Probe failures are informational only; playback is unaffected.
-        if (!controller.signal.aborted) {
-          setProbeState({ status: "failed" })
-        }
-      })
-
-    return () => controller.abort()
-  }, [source, hlsSource])
+  const { hlsSource, probeState, matroskaUrl } = usePlaybackSource(source)
 
   const nativeMediaRef = useRef<HTMLVideoElement | null>(null)
+
+  const [nativeVideoElement, setNativeVideoElement] =
+    useState<HTMLVideoElement | null>(null)
+
+  const attachNativeVideo = useCallback((element: HTMLVideoElement | null) => {
+    nativeMediaRef.current = element
+    setNativeVideoElement(element)
+  }, [])
 
   const {
     tracks: subtitleTracks,
     selectedId: selectedSubtitleId,
+    selectedTrack: selectedSubtitleTrack,
     addSubtitle,
     restoreSelection: restoreSubtitleSelection,
-  } = useExternalSubtitles({
+    assTrackData,
+    failSubtitle,
+    embeddedProbeFailed,
+  } = useSubtitles({
     useAdvancedEngine: mode === "mediabunny",
     nativeMediaRef,
     adapter,
+    matroskaUrl,
   })
 
   useEffect(() => {
@@ -156,7 +150,7 @@ export function PlaybackStage({
       element.src = source.url
       element.load()
     }
-  }, [mode, source.url, hlsSource])
+  }, [mode, nativeMediaRef, source.url, hlsSource])
 
   const audioTracks = useMemo(() => {
     if (probeState.status !== "ready") {
@@ -167,7 +161,7 @@ export function PlaybackStage({
       .filter((track) => track.kind === "audio")
       .map((track) => ({
         id: `${track.kind}-${track.number}`,
-        label: probeTrackLabel(track),
+        label: `${probeTrackLabel(track)}${track.default ? " · Default" : ""}`,
         // canDecode reflects the browser's own decoders: an E-AC-3/AC-3
         // track reports false until the engine lazily registers its WASM
         // decoder, so a false default track still needs the engine.
@@ -175,7 +169,10 @@ export function PlaybackStage({
       }))
   }, [probeState])
 
-  const effectiveSelectedId = selectedAudioTrackId ?? audioTracks[0]?.id ?? null
+  // Native playback does not expose its selected Matroska audio track in
+  // Chrome. Keep the selection unknown until the user chooses one or the
+  // advanced engine reports its actual selection.
+  const effectiveSelectedId = selectedAudioTrackId
 
   const migrateToEngine = useCallback(
     (nextAudioTrackId: string | null, element: HTMLVideoElement | null) => {
@@ -227,7 +224,14 @@ export function PlaybackStage({
         migrateToEngine(id, nativeMediaRef.current)
       }
     },
-    [audioTracks, effectiveSelectedId, engine, mode, migrateToEngine]
+    [
+      audioTracks,
+      effectiveSelectedId,
+      engine,
+      mode,
+      migrateToEngine,
+      nativeMediaRef,
+    ]
   )
 
   const onNativeError = useCallback(() => {
@@ -239,7 +243,7 @@ export function PlaybackStage({
     }
 
     migrateToEngine(effectiveSelectedId, nativeMediaRef.current)
-  }, [effectiveSelectedId, hlsSource, mode, migrateToEngine])
+  }, [effectiveSelectedId, hlsSource, mode, migrateToEngine, nativeMediaRef])
 
   const engineInit = useMemo<EngineInit>(
     () => ({
@@ -254,14 +258,22 @@ export function PlaybackStage({
     [source, snapshot]
   )
 
-  const tracksValue = useMemo<AudioTracksValue>(
-    () => ({
+  const tracksValue = useMemo<AudioTracksValue>(() => {
+    let selectionLabel = ""
+
+    if (mode === "native") {
+      selectionLabel = "Browser default"
+    } else if (effectiveSelectedId === null) {
+      selectionLabel = "Loading…"
+    }
+
+    return {
       tracks: audioTracks,
       selectedId: effectiveSelectedId,
+      selectionLabel,
       selectTrack,
-    }),
-    [audioTracks, effectiveSelectedId, selectTrack]
-  )
+    }
+  }, [audioTracks, effectiveSelectedId, mode, selectTrack])
 
   return (
     <AudioTracksContext.Provider value={tracksValue}>
@@ -272,17 +284,32 @@ export function PlaybackStage({
               {hlsSource ? (
                 <LazyHlsVideo
                   sourceUrl={source.url}
-                  videoRef={nativeMediaRef}
+                  videoRef={attachNativeVideo}
                   onError={onNativeError}
                 />
               ) : (
                 <Video
-                  ref={nativeMediaRef}
+                  ref={attachNativeVideo}
                   playsInline
                   preload="metadata"
                   onError={onNativeError}
                 />
               )}
+              {assTrackData !== null &&
+              selectedSubtitleTrack?.source.kind === "matroska" &&
+              (selectedSubtitleTrack.source.codecId === "S_TEXT/ASS" ||
+                selectedSubtitleTrack.source.codecId === "S_TEXT/SSA") ? (
+                <AssSubtitleOverlay
+                  key={selectedSubtitleTrack.id}
+                  trackId={selectedSubtitleTrack.id}
+                  data={assTrackData}
+                  useAdvancedEngine={false}
+                  nativeVideo={nativeVideoElement}
+                  adapter={null}
+                  engine={null}
+                  onFailure={failSubtitle}
+                />
+              ) : null}
             </VideoSkin>
           </VideoPlayer>
         ) : (
@@ -291,6 +318,7 @@ export function PlaybackStage({
               <MediabunnyVideo
                 init={engineInit}
                 onEngine={setEngine}
+                onSelectedAudioTrackId={setSelectedAudioTrackId}
                 onAdapter={(nextAdapter) => {
                   if (nextAdapter !== null && snapshot !== null) {
                     restoreSubtitleSelection(snapshot.subtitleTrackId)
@@ -308,6 +336,21 @@ export function PlaybackStage({
                   )}
                 />
               ) : null}
+              {assTrackData !== null &&
+              selectedSubtitleTrack?.source.kind === "matroska" &&
+              (selectedSubtitleTrack.source.codecId === "S_TEXT/ASS" ||
+                selectedSubtitleTrack.source.codecId === "S_TEXT/SSA") ? (
+                <AssSubtitleOverlay
+                  key={selectedSubtitleTrack.id}
+                  trackId={selectedSubtitleTrack.id}
+                  data={assTrackData}
+                  useAdvancedEngine
+                  nativeVideo={null}
+                  adapter={adapter}
+                  engine={engine}
+                  onFailure={failSubtitle}
+                />
+              ) : null}
             </VideoSkin>
           </VideoPlayer>
         )}
@@ -315,10 +358,70 @@ export function PlaybackStage({
           subtitleTracks,
           addSubtitle,
           canAddSubtitles: !hlsSource,
+          embeddedProbeFailed,
         })}
       </>
     </AudioTracksContext.Provider>
   )
+}
+
+function usePlaybackSource(source: PlaybackSource) {
+  const hlsSource = isHlsUrl(source.url)
+  const probeState = useSourceProbe(source, hlsSource)
+  const matroskaUrl = findMatroskaUrl(source.url, hlsSource, probeState)
+
+  return { hlsSource, probeState, matroskaUrl }
+}
+
+function useSourceProbe(
+  source: PlaybackSource,
+  hlsSource: boolean
+): ProbeState {
+  const [probeState, setProbeState] = useState<ProbeState>(() =>
+    hlsSource ? { status: "failed" } : { status: "loading" }
+  )
+
+  useEffect(() => {
+    if (hlsSource) {
+      return undefined
+    }
+
+    const controller = new AbortController()
+
+    probeSource(source, controller.signal)
+      .then((result) => {
+        setProbeState({ status: "ready", result })
+      })
+      .catch(() => {
+        // Probe failures are informational only; playback is unaffected.
+        if (!controller.signal.aborted) {
+          setProbeState({ status: "failed" })
+        }
+      })
+
+    return () => controller.abort()
+  }, [source, hlsSource])
+
+  return probeState
+}
+
+function findMatroskaUrl(
+  url: string,
+  hlsSource: boolean,
+  probeState: ProbeState
+): string | null {
+  if (hlsSource || isMatroskaUrl(url)) {
+    return hlsSource ? null : url
+  }
+
+  if (
+    probeState.status === "ready" &&
+    probeState.result.containerName.toLowerCase().includes("matroska")
+  ) {
+    return url
+  }
+
+  return null
 }
 
 // HLS media element, loaded on demand so hls.js never downloads for a
@@ -339,7 +442,7 @@ function LazyHlsVideo({
   onError,
 }: {
   sourceUrl: string
-  videoRef: React.RefObject<HTMLVideoElement | null>
+  videoRef: (element: HTMLVideoElement | null) => void
   onError: () => void
 }) {
   const [videoComponent, setVideoComponent] =

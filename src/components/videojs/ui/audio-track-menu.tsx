@@ -28,7 +28,7 @@ export function AudioTrackMenu({ ...props }: AudioTrackMenuProps = {}) {
 
   const selectedLabel =
     audioTracks.tracks.find((track) => track.id === audioTracks.selectedId)
-      ?.label ?? ""
+      ?.label ?? audioTracks.selectionLabel
 
   return (
     <Menu.Root {...props}>
