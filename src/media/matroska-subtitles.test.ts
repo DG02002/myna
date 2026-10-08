@@ -1603,7 +1603,7 @@ void test("loads only linked font attachments and tolerates a missing font", asy
   )
 })
 
-void test("reads indexed ASS clusters in a bounded batch and preserves cue order", async () => {
+void test("reads indexed ASS clusters with bounded concurrency and preserves cue order", async () => {
   const encoder = new TextEncoder()
 
   const packets = Array.from({ length: 24 }, (_, index) => ({
@@ -1699,10 +1699,163 @@ void test("reads indexed ASS clusters in a bounded batch and preserves cue order
       startTime: timestamp / 1_000,
     }))
   )
-  assert.ok(maximumActiveRequests >= 12)
-  assert.ok(maximumActiveRequests <= 24)
+  assert.ok(maximumActiveRequests > 1)
+  assert.ok(maximumActiveRequests <= 12)
   assert.ok(heldPages.size >= 16)
   assert.ok(requests.every(({ header }) => header.startsWith("bytes=")))
+})
+
+void test("fills the bounded indexed cluster read window behind a slow cluster", async () => {
+  const encoder = new TextEncoder()
+
+  const packets = Array.from({ length: 36 }, (_, index) => ({
+    timestamp: (index + 1) * 500,
+    textBytes: encoder.encode(
+      `0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Cue ${index}`
+    ),
+    cueDurationTicks: 1_000,
+  }))
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    clusterPaddingBytes: 64 * 1024,
+    tracks: [
+      makeTrack({
+        trackNumber: 2,
+        name: "ASS scheduling window",
+        language: "eng",
+        codecId: "S_TEXT/ASS",
+        codecPrivate: encoder.encode("[Script Info]\r\n[Events]\r\n"),
+        blocks: packets,
+      }),
+    ],
+  })
+
+  const clusterPages = findElementOffsets(bytes, IDS.cluster).map(
+    (offset) => Math.floor(offset / (64 * 1024)) * (64 * 1024)
+  )
+
+  const heldPage = clusterPages.at(2)
+  const lastPageInReadWindow = clusterPages.at(25)
+
+  if (heldPage === undefined || lastPageInReadWindow === undefined) {
+    throw new Error("The indexed ASS fixture is missing a cluster page.")
+  }
+
+  assert.equal(new Set(clusterPages).size, packets.length)
+
+  const requests: RecordedRange[] = []
+
+  const fixtureFetch = rangedFetch(bytes, requests)
+
+  let resolveHeldPageStarted!: () => void
+  let releaseHeldPage!: () => void
+
+  const heldPageStarted = new Promise<void>((resolve) => {
+    resolveHeldPageStarted = resolve
+  })
+
+  let resolveLastWindowPageStarted!: () => void
+
+  const lastWindowPageStarted = new Promise<void>((resolve) => {
+    resolveLastWindowPageStarted = resolve
+  })
+
+  const heldPageRelease = new Promise<void>((resolve) => {
+    releaseHeldPage = resolve
+  })
+
+  let activeClusterRangeReads = 0
+  let maximumActiveClusterRangeReads = 0
+  let lastWindowPageStartedBeforeRelease = false
+  let clusterBeyondWindowStartedBeforeRelease = false
+  let maximumClusterIndexStartedBeforeRelease = -1
+  let heldPageWasReleased = false
+
+  const received: string[] = []
+
+  const delayedFetch: typeof fetch = async (input, init) => {
+    const range = new Headers(init?.headers).get("Range") ?? ""
+    const match = /^bytes=(\d+)-\d+$/.exec(range)
+
+    if (match === null) {
+      return fixtureFetch(input, init)
+    }
+
+    const pageStart = Number(match[1])
+    const clusterIndex = clusterPages.indexOf(pageStart)
+
+    if (clusterIndex >= 0) {
+      // The fixture puts each cluster on a distinct range page.
+      activeClusterRangeReads += 1
+      maximumActiveClusterRangeReads = Math.max(
+        maximumActiveClusterRangeReads,
+        activeClusterRangeReads
+      )
+    }
+
+    if (!heldPageWasReleased && clusterIndex >= 0) {
+      maximumClusterIndexStartedBeforeRelease = Math.max(
+        maximumClusterIndexStartedBeforeRelease,
+        clusterIndex
+      )
+
+      if (clusterIndex > 25) {
+        clusterBeyondWindowStartedBeforeRelease = true
+      }
+    }
+
+    if (pageStart === lastPageInReadWindow) {
+      lastWindowPageStartedBeforeRelease = !heldPageWasReleased
+      resolveLastWindowPageStarted()
+    }
+
+    try {
+      if (pageStart === heldPage) {
+        resolveHeldPageStarted()
+        await heldPageRelease
+      }
+
+      return await fixtureFetch(input, init)
+    } finally {
+      if (clusterIndex >= 0) {
+        activeClusterRangeReads -= 1
+      }
+    }
+  }
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/indexed-ass-window.mkv",
+    delayedFetch
+  )
+
+  const stream = reader.streamAssTrack(2, new AbortController().signal)
+
+  stream.subscribePackets((batch) => {
+    received.push(...batch.map(({ data }) => new TextDecoder().decode(data)))
+  })
+
+  await heldPageStarted
+
+  try {
+    await lastWindowPageStarted
+
+    assert.equal(heldPageWasReleased, false)
+    assert.equal(lastWindowPageStartedBeforeRelease, true)
+    assert.equal(clusterBeyondWindowStartedBeforeRelease, false)
+    assert.equal(maximumClusterIndexStartedBeforeRelease, 25)
+  } finally {
+    heldPageWasReleased = true
+    releaseHeldPage()
+  }
+
+  assert.ok(maximumActiveClusterRangeReads <= 12)
+  const result = await stream.result
+  assert.equal(result.packets.length, packets.length)
+  assert.deepEqual(
+    received,
+    packets.map(({ textBytes }) => new TextDecoder().decode(textBytes))
+  )
 })
 
 void test("cancels every pending range in an indexed ASS batch", async () => {

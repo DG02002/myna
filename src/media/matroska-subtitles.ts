@@ -106,8 +106,10 @@ const MAX_CODEC_PRIVATE_BYTES = 256 * 1024
 
 const MAX_ASS_PACKET_BYTES = 4 * 1024 * 1024
 
-// Keep high-latency byte sources moving while bounding active cluster reads.
+// Bound active reads and ordered results while keeping slow sources moving.
 const INDEXED_CLUSTER_READ_CONCURRENCY = 12
+
+const INDEXED_CLUSTER_READ_WINDOW = INDEXED_CLUSTER_READ_CONCURRENCY * 2
 
 const MAX_ASS_FONT_BYTES = 32 * 1024 * 1024
 
@@ -391,19 +393,175 @@ interface IndexedCueOptions {
   signal: AbortSignal
 }
 
-interface IndexedClusterBatchOptions {
-  metadata: ParsedFile
-  trackNumber: number
-  clusters: Array<[number, TrackPosition[]]>
-  signal: AbortSignal
-}
-
 interface CueClusterOptions {
   metadata: ParsedFile
   trackNumber: number
   clusterPosition: number
   positions: TrackPosition[]
   signal: AbortSignal
+}
+
+type IndexedCueCluster = [clusterPosition: number, positions: TrackPosition[]]
+
+interface IndexedClusterReadWindowOptions {
+  clusters: IndexedCueCluster[]
+  signal: AbortSignal
+  readCluster: (
+    cluster: IndexedCueCluster,
+    signal: AbortSignal
+  ) => Promise<DecodedBlock[]>
+}
+
+interface IndexedClusterWindowResult {
+  blocks: DecodedBlock[]
+  advanced: boolean
+}
+
+class IndexedClusterReadWindow {
+  private readonly controller = new AbortController()
+
+  private readonly completed = new Map<number, DecodedBlock[]>()
+
+  private readonly active = new Map<number, Promise<void>>()
+
+  private nextToStart = 0
+
+  private nextToYield = 0
+
+  private failure: Error | null = null
+
+  private wakeReader: (() => void) | null = null
+
+  private readonly abortFromParent = () => {
+    this.controller.abort()
+    this.notifyReader()
+  }
+
+  constructor(private readonly options: IndexedClusterReadWindowOptions) {
+    const { signal } = options
+
+    signal.addEventListener("abort", this.abortFromParent, { once: true })
+
+    if (signal.aborted) {
+      this.controller.abort()
+    }
+  }
+
+  async *batches(): AsyncGenerator<DecodedBlock[]> {
+    this.startAvailableReads()
+
+    try {
+      while (this.nextToYield < this.options.clusters.length) {
+        if (this.options.signal.aborted) {
+          throw new MatroskaSubtitleError("aborted")
+        }
+
+        const ready = this.takeContiguousResults()
+
+        if (ready.advanced) {
+          this.startAvailableReads()
+
+          if (ready.blocks.length > 0) {
+            yield ready.blocks
+          }
+
+          continue
+        }
+
+        if (this.failure !== null) {
+          throw this.failure
+        }
+
+        await this.waitForChange()
+      }
+
+      if (this.failure !== null) {
+        throw this.failure
+      }
+    } finally {
+      await this.dispose()
+    }
+  }
+
+  private startAvailableReads(): void {
+    while (
+      !this.controller.signal.aborted &&
+      this.failure === null &&
+      this.active.size < INDEXED_CLUSTER_READ_CONCURRENCY &&
+      this.nextToStart < this.options.clusters.length &&
+      this.nextToStart < this.nextToYield + INDEXED_CLUSTER_READ_WINDOW
+    ) {
+      const index = this.nextToStart
+      const cluster = this.options.clusters[index]
+
+      if (cluster === undefined) {
+        break
+      }
+
+      this.nextToStart += 1
+
+      this.startRead(index, cluster)
+    }
+  }
+
+  private startRead(index: number, cluster: IndexedCueCluster): void {
+    const task = this.options
+      .readCluster(cluster, this.controller.signal)
+      .then(
+        (blocks) => {
+          this.completed.set(index, blocks)
+        },
+        (error: Error) => {
+          this.failure ??= error
+          this.controller.abort()
+        }
+      )
+      .finally(() => {
+        this.active.delete(index)
+        this.startAvailableReads()
+        this.notifyReader()
+      })
+
+    this.active.set(index, task)
+  }
+
+  private takeContiguousResults(): IndexedClusterWindowResult {
+    const blocks: DecodedBlock[] = []
+    let advanced = false
+
+    while (this.completed.has(this.nextToYield)) {
+      const result = this.completed.get(this.nextToYield)
+
+      if (result === undefined) {
+        break
+      }
+
+      this.completed.delete(this.nextToYield)
+      blocks.push(...result)
+      this.nextToYield += 1
+      advanced = true
+    }
+
+    return { blocks, advanced }
+  }
+
+  private notifyReader(): void {
+    const wake = this.wakeReader
+    this.wakeReader = null
+    wake?.()
+  }
+
+  private waitForChange(): Promise<void> {
+    return new Promise((resolve) => {
+      this.wakeReader = resolve
+    })
+  }
+
+  private async dispose(): Promise<void> {
+    this.controller.abort()
+    await Promise.all(this.active.values())
+    this.options.signal.removeEventListener("abort", this.abortFromParent)
+  }
 }
 
 interface ClusterReadOptions {
@@ -2262,29 +2420,20 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
       throw new MatroskaSubtitleError("limit")
     }
 
-    for (
-      let batchStart = 0;
-      batchStart < clusters.length;
-      batchStart += INDEXED_CLUSTER_READ_CONCURRENCY
-    ) {
-      if (signal.aborted) {
-        throw new MatroskaSubtitleError("aborted")
-      }
+    const readWindow = new IndexedClusterReadWindow({
+      clusters,
+      signal,
+      readCluster: ([clusterPosition, positions], readSignal) =>
+        this.readCueCluster({
+          metadata,
+          trackNumber,
+          clusterPosition,
+          positions,
+          signal: readSignal,
+        }),
+    })
 
-      const clusterBatch = clusters.slice(
-        batchStart,
-        batchStart + INDEXED_CLUSTER_READ_CONCURRENCY
-      )
-
-      const batchBlocks = await this.readIndexedClusterBatch({
-        metadata,
-        trackNumber,
-        clusters: clusterBatch,
-        signal,
-      })
-
-      const decodedBlocks = batchBlocks.flat()
-
+    for await (const decodedBlocks of readWindow.batches()) {
       for (const block of decodedBlocks) {
         blockCount += 1
         textBytes += block.textBytes
@@ -2298,42 +2447,6 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
       }
 
       yield decodedBlocks
-    }
-  }
-
-  private async readIndexedClusterBatch({
-    metadata,
-    trackNumber,
-    clusters,
-    signal,
-  }: IndexedClusterBatchOptions): Promise<DecodedBlock[][]> {
-    const controller = new AbortController()
-    const abortFromParent = () => controller.abort()
-
-    signal.addEventListener("abort", abortFromParent, { once: true })
-
-    if (signal.aborted) {
-      controller.abort()
-    }
-
-    const pending = clusters.map(([clusterPosition, positions]) =>
-      this.readCueCluster({
-        metadata,
-        trackNumber,
-        clusterPosition,
-        positions,
-        signal: controller.signal,
-      })
-    )
-
-    try {
-      return await Promise.all(pending)
-    } catch (error) {
-      controller.abort()
-      await Promise.allSettled(pending)
-      throw error
-    } finally {
-      signal.removeEventListener("abort", abortFromParent)
     }
   }
 
