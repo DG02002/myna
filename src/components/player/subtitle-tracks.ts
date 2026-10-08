@@ -88,7 +88,7 @@ function releaseSelectedSubtitle(
       track.id === releasedAssTrackId &&
       track.source.kind === "matroska" &&
       isAssSubtitleCodec(track.source.codecId) &&
-      track.status === "ready"
+      (track.status === "ready" || track.status === "incomplete")
 
     return selectedLoadWasCancelled || completedAssTrackWasReleased
       ? { ...track, status: "available" }
@@ -122,6 +122,70 @@ function updateEmbeddedSubtitleTrack({
       return updatedTrack
     })
   )
+}
+
+function canKeepPartialAssTrack(
+  signal: AbortSignal,
+  hasPackets: boolean
+): boolean {
+  return !signal.aborted && hasPackets
+}
+
+async function loadEmbeddedAssSubtitleContent({
+  track,
+  trackNumber,
+  reader,
+  signal,
+  setTracks,
+  setAssTrackStream,
+  setAssTrackStreamId,
+}: {
+  track: SubtitleTrack
+  trackNumber: number
+  reader: MatroskaSubtitleReader
+  signal: AbortSignal
+  setTracks: SetSubtitleTracks
+  setAssTrackStream: SetAssTrackStream
+  setAssTrackStreamId: SetAssTrackStreamId
+}): Promise<void> {
+  const stream = reader.streamAssTrack(trackNumber, signal)
+
+  setAssTrackStream(stream)
+  setAssTrackStreamId(track.id)
+
+  let hasPackets = false
+
+  const unsubscribePackets = stream.subscribePackets((packets) => {
+    hasPackets ||= packets.length > 0
+  })
+
+  try {
+    await stream.result
+  } catch (error) {
+    // Packet delivery is the safe boundary: preserve cues already sent to the renderer.
+    if (canKeepPartialAssTrack(signal, hasPackets)) {
+      updateEmbeddedSubtitleTrack({
+        setTracks,
+        id: track.id,
+        status: "incomplete",
+      })
+
+      return
+    }
+
+    throw error
+  } finally {
+    unsubscribePackets()
+  }
+
+  if (!signal.aborted) {
+    updateEmbeddedSubtitleTrack({
+      setTracks,
+      id: track.id,
+      status: "ready",
+      cues: [],
+    })
+  }
 }
 
 async function loadEmbeddedSubtitleContent({
@@ -158,20 +222,15 @@ async function loadEmbeddedSubtitleContent({
     return
   }
 
-  const stream = reader.streamAssTrack(track.source.trackNumber, signal)
-
-  setAssTrackStream(stream)
-  setAssTrackStreamId(track.id)
-  await stream.result
-
-  if (!signal.aborted) {
-    updateEmbeddedSubtitleTrack({
-      setTracks,
-      id: track.id,
-      status: "ready",
-      cues: [],
-    })
-  }
+  await loadEmbeddedAssSubtitleContent({
+    track,
+    trackNumber: track.source.trackNumber,
+    reader,
+    signal,
+    setTracks,
+    setAssTrackStream,
+    setAssTrackStreamId,
+  })
 }
 
 async function loadEmbeddedSubtitle({
@@ -248,7 +307,7 @@ export function startEmbeddedSubtitleLoad({
   setAssTrackStream: SetAssTrackStream
   setAssTrackStreamId: SetAssTrackStreamId
 }): Promise<void> | undefined {
-  if (track.source.kind !== "matroska") {
+  if (track.source.kind !== "matroska" || track.status === "incomplete") {
     return undefined
   }
 
@@ -499,6 +558,7 @@ export function useSubtitles({
       selectedTrack === undefined ||
       selectedTrack.source.kind !== "matroska" ||
       selectedTrack.status === "ready" ||
+      selectedTrack.status === "incomplete" ||
       selectedTrack.status === "failed" ||
       (!isEmbeddedText && !isEmbeddedAss)
     ) {

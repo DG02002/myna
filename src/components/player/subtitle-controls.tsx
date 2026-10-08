@@ -76,6 +76,14 @@ export function SubtitleControls({
             )
           }
 
+          if (track.status === "incomplete") {
+            return (
+              <p className="text-muted-foreground text-xs" key={track.id}>
+                Loaded part of {track.label}; later subtitles may be missing.
+              </p>
+            )
+          }
+
           return null
         })}
       </div>

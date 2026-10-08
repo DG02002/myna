@@ -1,9 +1,10 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 
-import type {
-  MatroskaAssTrackStream,
-  MatroskaSubtitleReader,
+import {
+  MatroskaSubtitleError as MatroskaSubtitleFailure,
+  type MatroskaAssTrackStream,
+  type MatroskaSubtitleReader,
 } from "#/media/matroska-subtitles"
 import type { SubtitleTrack } from "#/media/subtitles"
 
@@ -24,6 +25,7 @@ interface ControlledStream {
   emit: (text: string) => void
   finish: () => void
   cancel: () => void
+  fail: (failure: Error) => void
   listenerCount: () => number
   listeners: () => Array<(packets: AssPacket[]) => void>
 }
@@ -76,7 +78,8 @@ function createControlledStream(): ControlledStream {
         packets: retained,
         fonts: [],
       }),
-    cancel: () => rejectResult(new Error("cancelled")),
+    cancel: () => rejectResult(new MatroskaSubtitleFailure("aborted")),
+    fail: (failure) => rejectResult(failure),
     listenerCount: () => listeners.size,
     listeners: () => [...listeners],
   }
@@ -174,7 +177,7 @@ function createLoadHarness(stream: MatroskaAssTrackStream) {
     pendingLoad,
     startAgain: () =>
       startEmbeddedSubtitleLoad({
-        track,
+        track: { ...track, status: tracks[0]?.status ?? track.status },
         reader,
         embeddedLoad: loadRef,
         setTracks,
@@ -310,5 +313,48 @@ void test("cancellation cleans up the overlay subscription without failing", asy
   assert.equal(controlled.listenerCount(), 0)
   assert.equal(load.controller.signal.aborted, true)
   assert.notEqual(load.tracks()[0]?.status, "failed")
+  assert.notEqual(load.tracks()[0]?.status, "incomplete")
   assert.equal(failures, 0)
+})
+
+void test("deadline after partial packets keeps the selected ASS stream usable", async () => {
+  const controlled = createControlledStream()
+  const load = createLoadHarness(controlled.stream)
+
+  controlled.emit("already rendered")
+  controlled.fail(new MatroskaSubtitleFailure("deadline"))
+  await load.pendingLoad
+
+  assert.equal(load.controller.signal.aborted, false)
+  assert.equal(load.tracks()[0]?.status, "incomplete")
+  assert.equal(load.currentStream(), controlled.stream)
+  assert.equal(load.currentStreamId(), "matroska-2")
+  assert.equal(load.startAgain(), undefined)
+  assert.equal(load.streamStartCount(), 1)
+
+  const renderer = createRenderer()
+
+  const cleanup = subscribeAssSubtitlePackets({
+    stream: controlled.stream,
+    renderer,
+    onFailure: () => assert.fail("retained packets should still replay"),
+  })
+
+  assert.deepEqual(renderer.packets, ["already rendered"])
+  cleanup()
+})
+
+void test("keeps delivered ASS packets after an unclassified stream failure", async () => {
+  const controlled = createControlledStream()
+  const load = createLoadHarness(controlled.stream)
+
+  controlled.emit("already rendered")
+  controlled.fail(new Error("stream failure"))
+  await load.pendingLoad
+
+  assert.equal(load.tracks()[0]?.status, "incomplete")
+  assert.equal(load.currentStream(), controlled.stream)
+  assert.equal(load.currentStreamId(), "matroska-2")
+  assert.equal(load.startAgain(), undefined)
+  assert.equal(load.streamStartCount(), 1)
 })

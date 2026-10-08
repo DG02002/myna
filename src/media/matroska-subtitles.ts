@@ -51,17 +51,30 @@ export interface MatroskaSubtitleReader {
   ): Promise<MatroskaAssTrackData>
 }
 
-type MatroskaSubtitleFailureKind =
+export type MatroskaSubtitleFailureKind =
   | "aborted"
+  | "deadline"
   | "invalid"
   | "limit"
   | "unsupported"
   | "unreachable"
   | "timeout"
 
-class MatroskaSubtitleError extends Error {
+function subtitleErrorMessage(kind: MatroskaSubtitleFailureKind): string {
+  switch (kind) {
+    case "deadline":
+      return "Embedded subtitle extraction timed out."
+    case "timeout":
+      return "Embedded subtitle range request timed out."
+    default:
+      return `Embedded subtitles are ${kind}.`
+  }
+}
+
+export class MatroskaSubtitleError extends Error {
   constructor(readonly kind: MatroskaSubtitleFailureKind) {
-    super(`Embedded subtitles are ${kind}.`)
+    super(subtitleErrorMessage(kind))
+
     this.name = "MatroskaSubtitleError"
   }
 }
@@ -432,6 +445,7 @@ interface ScannedCluster {
 
 interface DeadlineScope {
   signal: AbortSignal
+  expired: () => boolean
   dispose: () => void
 }
 
@@ -1202,7 +1216,13 @@ function withDeadline(
 ): DeadlineScope {
   const controller = new AbortController()
   const abortFromParent = () => controller.abort()
-  const deadline = setTimeout(() => controller.abort(), timeoutMs)
+
+  let expired = false
+
+  const deadline = setTimeout(() => {
+    expired = true
+    controller.abort()
+  }, timeoutMs)
 
   if (parentSignal.aborted) {
     controller.abort()
@@ -1212,6 +1232,7 @@ function withDeadline(
 
   return {
     signal: controller.signal,
+    expired: () => expired,
     dispose: () => {
       clearTimeout(deadline)
       parentSignal.removeEventListener("abort", abortFromParent)
@@ -1386,6 +1407,18 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
         fonts: input.fonts,
       }
     } catch (failure) {
+      if (signal.aborted) {
+        throw new MatroskaSubtitleError("aborted")
+      }
+
+      if (
+        deadline.expired() &&
+        failure instanceof MatroskaSubtitleError &&
+        failure.kind === "aborted"
+      ) {
+        throw new MatroskaSubtitleError("deadline")
+      }
+
       if (failure instanceof MatroskaSubtitleError) {
         throw failure
       }

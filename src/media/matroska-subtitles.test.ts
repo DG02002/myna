@@ -1344,6 +1344,131 @@ void test("streams indexed ASS packets before later cluster reads finish", async
   assert.deepEqual(replayed, received)
 })
 
+void test("ASS deadline reports timeout after retaining partial packets", async (context) => {
+  let expireDeadline: (() => void) | undefined
+  const originalSetTimeout = globalThis.setTimeout
+
+  context.mock.method(
+    globalThis,
+    "setTimeout",
+    (callback: (...args: never[]) => void, delay?: number) => {
+      if (delay === 240_000) {
+        expireDeadline = () => callback()
+
+        return originalSetTimeout(() => undefined, delay)
+      }
+
+      return originalSetTimeout(callback, delay)
+    }
+  )
+
+  const encoder = new TextEncoder()
+
+  const packets = Array.from({ length: 13 }, (_, index) => ({
+    timestamp: (index + 1) * 1_000,
+    textBytes: encoder.encode(
+      `0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Cue ${index}`
+    ),
+    cueDurationTicks: 1_000,
+  }))
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    clusterPaddingBytes: 64 * 1024,
+    tracks: [
+      makeTrack({
+        trackNumber: 2,
+        name: "ASS deadline",
+        language: "eng",
+        codecId: "S_TEXT/ASS",
+        codecPrivate: encoder.encode("[Script Info]\r\n[Events]\r\n"),
+        blocks: packets,
+      }),
+    ],
+  })
+
+  const lastClusterOffset = findElementOffsets(bytes, IDS.cluster).at(-1) ?? 0
+
+  const delayedPage = Math.floor(lastClusterOffset / (64 * 1024)) * (64 * 1024)
+
+  const fixtureFetch = rangedFetch(bytes, [])
+
+  let startDelayedPage!: () => void
+
+  const delayedPageStarted = new Promise<void>((resolve) => {
+    startDelayedPage = resolve
+  })
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const range = new Headers(init?.headers).get("Range") ?? ""
+    const start = Number(/^bytes=(\d+)-\d+$/.exec(range)?.[1])
+
+    if (start === delayedPage) {
+      startDelayedPage()
+
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Deadline", "AbortError")),
+          { once: true }
+        )
+      })
+    }
+
+    return fixtureFetch(input, init)
+  }
+
+  const source = new AbortController()
+
+  const stream = createMatroskaSubtitleReader(
+    "https://media.example/partial-ass-deadline.mkv",
+    fetcher
+  ).streamAssTrack(2, source.signal)
+
+  const received: string[] = []
+  const replayed: string[] = []
+
+  let resolveFirstBatch!: () => void
+
+  const firstBatch = new Promise<void>((resolve) => {
+    resolveFirstBatch = resolve
+  })
+
+  void stream.result.catch(() => {})
+
+  stream.subscribePackets((batch) => {
+    received.push(...batch.map(({ data }) => new TextDecoder().decode(data)))
+
+    if (received.length >= 12) {
+      resolveFirstBatch()
+    }
+  })
+
+  await firstBatch
+  await delayedPageStarted
+  assert.equal(received.length, 12)
+  assert.ok(expireDeadline)
+
+  expireDeadline()
+
+  await assert.rejects(stream.result, {
+    kind: "deadline",
+    message: "Embedded subtitle extraction timed out.",
+  })
+
+  assert.equal(source.signal.aborted, false)
+
+  const unsubscribe = stream.subscribePackets((batch) => {
+    replayed.push(...batch.map(({ data }) => new TextDecoder().decode(data)))
+  })
+
+  unsubscribe()
+
+  assert.equal(received.length, 12)
+  assert.deepEqual(replayed, received)
+  assert.equal(replayed.includes("Cue 12"), false)
+})
+
 void test("accepts ASS tracks above 10,000 packets within the shared cue limit", async () => {
   const encoder = new TextEncoder()
 
@@ -1668,7 +1793,7 @@ void test("cancels every pending range in an indexed ASS batch", async () => {
   await batchReady
   controller.abort()
 
-  await assert.rejects(read, /aborted/)
+  await assert.rejects(read, { kind: "aborted" })
   assert.equal(pendingRequests, 4)
   assert.equal(abortedRequests, 4)
 })

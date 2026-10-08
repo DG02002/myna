@@ -26,7 +26,7 @@ export interface SubtitleTrack {
         trackNumber: number
         codecId: string
       }
-  status: "loading" | "available" | "ready" | "failed"
+  status: "loading" | "available" | "ready" | "incomplete" | "failed"
   cues: SubtitleCue[]
 }
 
