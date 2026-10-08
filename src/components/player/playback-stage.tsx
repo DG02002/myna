@@ -122,7 +122,7 @@ export function PlaybackStage({
     selectedTrack: selectedSubtitleTrack,
     addSubtitle,
     restoreSelection: restoreSubtitleSelection,
-    assTrackData,
+    assTrackStream,
     failSubtitle,
     embeddedProbeFailed,
   } = useSubtitles({
@@ -295,14 +295,14 @@ export function PlaybackStage({
                   onError={onNativeError}
                 />
               )}
-              {assTrackData !== null &&
+              {assTrackStream !== null &&
               selectedSubtitleTrack?.source.kind === "matroska" &&
               (selectedSubtitleTrack.source.codecId === "S_TEXT/ASS" ||
                 selectedSubtitleTrack.source.codecId === "S_TEXT/SSA") ? (
                 <AssSubtitleOverlay
                   key={selectedSubtitleTrack.id}
                   trackId={selectedSubtitleTrack.id}
-                  data={assTrackData}
+                  stream={assTrackStream}
                   useAdvancedEngine={false}
                   nativeVideo={nativeVideoElement}
                   adapter={null}
@@ -336,14 +336,14 @@ export function PlaybackStage({
                   )}
                 />
               ) : null}
-              {assTrackData !== null &&
+              {assTrackStream !== null &&
               selectedSubtitleTrack?.source.kind === "matroska" &&
               (selectedSubtitleTrack.source.codecId === "S_TEXT/ASS" ||
                 selectedSubtitleTrack.source.codecId === "S_TEXT/SSA") ? (
                 <AssSubtitleOverlay
                   key={selectedSubtitleTrack.id}
                   trackId={selectedSubtitleTrack.id}
-                  data={assTrackData}
+                  stream={assTrackStream}
                   useAdvancedEngine
                   nativeVideo={null}
                   adapter={adapter}

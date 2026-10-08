@@ -21,15 +21,30 @@ interface MatroskaAssPacket {
   duration: number
 }
 
-export interface MatroskaAssTrackData {
+interface MatroskaAssTrackMetadata {
+  codecPrivate: Uint8Array
+  fonts: Uint8Array[]
+}
+
+interface MatroskaAssTrackData {
   codecPrivate: Uint8Array
   packets: MatroskaAssPacket[]
   fonts: Uint8Array[]
 }
 
+export interface MatroskaAssTrackStream {
+  metadata: Promise<MatroskaAssTrackMetadata>
+  result: Promise<MatroskaAssTrackData>
+  subscribePackets(listener: (packets: MatroskaAssPacket[]) => void): () => void
+}
+
 export interface MatroskaSubtitleReader {
   probe(signal: AbortSignal): Promise<MatroskaTextTrack[]>
   readCues(trackNumber: number, signal: AbortSignal): Promise<SubtitleCue[]>
+  streamAssTrack(
+    trackNumber: number,
+    signal: AbortSignal
+  ): MatroskaAssTrackStream
   readAssTrack(
     trackNumber: number,
     signal: AbortSignal
@@ -61,7 +76,7 @@ const MAX_CACHED_BYTES = 1024 * 1024
 
 const MAX_METADATA_SCAN_BYTES = 1024 * 1024
 
-const MAX_CUES_ELEMENT_BYTES = 2 * 1024 * 1024
+const MAX_CUES_ELEMENT_BYTES = 4 * 1024 * 1024
 
 const CUE_INDEX_PAGE_SIZE = 64 * 1024
 
@@ -418,6 +433,96 @@ interface ScannedCluster {
 interface DeadlineScope {
   signal: AbortSignal
   dispose: () => void
+}
+
+interface MutableMatroskaAssTrackStream {
+  stream: MatroskaAssTrackStream
+  setMetadata: (metadata: MatroskaAssTrackMetadata) => void
+  appendPackets: (packets: MatroskaAssPacket[]) => void
+  complete: (data: MatroskaAssTrackData) => void
+  fail: (failure: MatroskaSubtitleError) => void
+}
+
+interface AssTrackPacketReadOptions {
+  metadata: ParsedFile
+  trackNumber: number
+  signal: AbortSignal
+  stream: MutableMatroskaAssTrackStream
+}
+
+function createMatroskaAssTrackStream(): MutableMatroskaAssTrackStream {
+  let resolveMetadata!: (metadata: MatroskaAssTrackMetadata) => void
+  let rejectMetadata!: (failure: MatroskaSubtitleError) => void
+  let resolveResult!: (data: MatroskaAssTrackData) => void
+  let rejectResult!: (failure: MatroskaSubtitleError) => void
+  let metadataSettled = false
+
+  const packets: MatroskaAssPacket[] = []
+  const listeners = new Set<(batch: MatroskaAssPacket[]) => void>()
+
+  const metadata = new Promise<MatroskaAssTrackMetadata>((resolve, reject) => {
+    resolveMetadata = resolve
+    rejectMetadata = reject
+  })
+
+  const result = new Promise<MatroskaAssTrackData>((resolve, reject) => {
+    resolveResult = resolve
+    rejectResult = reject
+  })
+
+  // A renderer may unmount before metadata arrives; the load owner still
+  // observes `result`, while preventing an unused metadata rejection.
+  void metadata.catch(() => {})
+
+  return {
+    stream: {
+      metadata,
+      result,
+      subscribePackets: (listener) => {
+        listeners.add(listener)
+
+        if (packets.length > 0) {
+          listener(packets)
+        }
+
+        return () => listeners.delete(listener)
+      },
+    },
+    setMetadata: (value) => {
+      if (!metadataSettled) {
+        metadataSettled = true
+        resolveMetadata(value)
+      }
+    },
+    appendPackets: (batch) => {
+      if (batch.length === 0) {
+        return
+      }
+
+      packets.push(...batch)
+
+      for (const listener of listeners) {
+        listener(batch)
+      }
+    },
+    complete: (data) => {
+      if (!metadataSettled) {
+        const value = { codecPrivate: data.codecPrivate, fonts: data.fonts }
+        metadataSettled = true
+        resolveMetadata(value)
+      }
+
+      resolveResult({ ...data, packets })
+    },
+    fail: (failure) => {
+      if (!metadataSettled) {
+        metadataSettled = true
+        rejectMetadata(failure)
+      }
+
+      rejectResult(failure)
+    },
+  }
 }
 
 function createTrackMetadata(): TrackMetadata {
@@ -1230,6 +1335,13 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     trackNumber: number,
     signal: AbortSignal
   ): Promise<MatroskaAssTrackData> {
+    return this.streamAssTrack(trackNumber, signal).result
+  }
+
+  streamAssTrack(
+    trackNumber: number,
+    signal: AbortSignal
+  ): MatroskaAssTrackStream {
     // Font data and cue packets need a larger byte budget than Phase 8 text
     // cues. Use an isolated reader so selecting ASS never changes UTF8 limits.
     const reader = new MatroskaSubtitleReaderImpl(
@@ -1238,92 +1350,151 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
       this.createCueRangeReader
     )
 
-    return reader.readAssTrackWithinBudget(trackNumber, signal)
+    const trackStream = createMatroskaAssTrackStream()
+
+    void reader
+      .readAssTrackWithinBudget(trackNumber, signal, trackStream)
+      .then(trackStream.complete, trackStream.fail)
+
+    return trackStream.stream
   }
 
   private async readAssTrackWithinBudget(
     trackNumber: number,
-    signal: AbortSignal
+    signal: AbortSignal,
+    stream: MutableMatroskaAssTrackStream
   ): Promise<MatroskaAssTrackData> {
     const deadline = withDeadline(signal, ASS_TRACK_DEADLINE_MS)
 
     try {
-      const metadata = await this.readMetadata(deadline.signal)
-
-      const track = metadata.tracks.find(
-        (candidate) => candidate.trackNumber === trackNumber
-      )
-
-      if (
-        track === undefined ||
-        !isAssCodecId(track.codecId) ||
-        track.codecPrivate === null ||
-        track.codecPrivate.size === null ||
-        track.codecPrivate.size === 0
-      ) {
-        throw new MatroskaSubtitleError("invalid")
-      }
-
-      if (track.hasContentEncodings) {
-        throw new MatroskaSubtitleError("unsupported")
-      }
-
-      if (track.codecPrivate.size > MAX_CODEC_PRIVATE_BYTES) {
-        throw new MatroskaSubtitleError("limit")
-      }
-
-      const codecPrivate = await this.reader.read(
-        track.codecPrivate.dataStart,
-        track.codecPrivate.size,
-        deadline.signal
-      )
-
-      const blocks = await this.readTrackBlocks(
-        metadata,
+      const input = await this.readAssTrackInput(
         trackNumber,
-        deadline.signal
+        deadline.signal,
+        stream
       )
 
-      if (blocks.length === 0) {
-        throw new MatroskaSubtitleError("invalid")
+      const packets = await this.readAssTrackPackets({
+        metadata: input.metadata,
+        trackNumber,
+        signal: deadline.signal,
+        stream,
+      })
+
+      return {
+        codecPrivate: input.codecPrivate,
+        packets,
+        fonts: input.fonts,
+      }
+    } catch (failure) {
+      if (failure instanceof MatroskaSubtitleError) {
+        throw failure
       }
 
-      const packets = this.createAssPackets(blocks, metadata.timestampScale)
-
-      const fonts = await this.readLinkedFonts(
-        metadata.attachments,
-        track.attachmentLinkUids,
-        deadline.signal
-      )
-
-      return { codecPrivate, packets, fonts }
+      throw new MatroskaSubtitleError("unreachable")
     } finally {
       deadline.dispose()
     }
+  }
+
+  private async readAssTrackInput(
+    trackNumber: number,
+    signal: AbortSignal,
+    stream: MutableMatroskaAssTrackStream
+  ): Promise<{
+    metadata: ParsedFile
+    codecPrivate: Uint8Array
+    fonts: Uint8Array[]
+  }> {
+    const metadata = await this.readMetadata(signal)
+
+    const track = metadata.tracks.find(
+      (candidate) => candidate.trackNumber === trackNumber
+    )
+
+    if (
+      track === undefined ||
+      !isAssCodecId(track.codecId) ||
+      track.codecPrivate === null ||
+      track.codecPrivate.size === null ||
+      track.codecPrivate.size === 0
+    ) {
+      throw new MatroskaSubtitleError("invalid")
+    }
+
+    if (track.hasContentEncodings) {
+      throw new MatroskaSubtitleError("unsupported")
+    }
+
+    if (track.codecPrivate.size > MAX_CODEC_PRIVATE_BYTES) {
+      throw new MatroskaSubtitleError("limit")
+    }
+
+    const codecPrivate = await this.reader.read(
+      track.codecPrivate.dataStart,
+      track.codecPrivate.size,
+      signal
+    )
+
+    const fonts = await this.readLinkedFonts(
+      metadata.attachments,
+      track.attachmentLinkUids,
+      signal
+    )
+
+    stream.setMetadata({ codecPrivate, fonts })
+
+    return { metadata, codecPrivate, fonts }
+  }
+
+  private async readAssTrackPackets({
+    metadata,
+    trackNumber,
+    signal,
+    stream,
+  }: AssTrackPacketReadOptions): Promise<MatroskaAssPacket[]> {
+    const packets: MatroskaAssPacket[] = []
+    let packetBytes = 0
+
+    for await (const blocks of this.readTrackBlockBatches(
+      metadata,
+      trackNumber,
+      signal
+    )) {
+      const batch = this.createAssPackets(blocks, metadata.timestampScale)
+
+      packets.push(...batch)
+      packetBytes += batch.reduce(
+        (total, packet) => total + packet.data.byteLength,
+        0
+      )
+
+      if (
+        packets.length > MAX_SUBTITLE_CUES ||
+        packetBytes > MAX_ASS_PACKET_BYTES
+      ) {
+        throw new MatroskaSubtitleError("limit")
+      }
+
+      stream.appendPackets(batch)
+    }
+
+    if (packets.length === 0) {
+      throw new MatroskaSubtitleError("invalid")
+    }
+
+    return packets
   }
 
   private createAssPackets(
     blocks: DecodedBlock[],
     timestampScale: number
   ): MatroskaAssPacket[] {
-    if (blocks.length > MAX_SUBTITLE_CUES) {
-      throw new MatroskaSubtitleError("limit")
-    }
-
-    let packetBytes = 0
-
     return blocks.map((block) => {
       const endTime = this.endTime(
         block.startTime,
         block.durationTicks,
         timestampScale
       )
-
-      packetBytes += block.packetBytes.byteLength
-
-      if (packetBytes > MAX_ASS_PACKET_BYTES) {
-        throw new MatroskaSubtitleError("limit")
-      }
 
       return {
         data: block.packetBytes,
@@ -1915,20 +2086,46 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     trackNumber: number,
     signal: AbortSignal
   ): Promise<DecodedBlock[]> {
+    const blocks: DecodedBlock[] = []
+
+    for await (const batch of this.readTrackBlockBatches(
+      metadata,
+      trackNumber,
+      signal
+    )) {
+      this.appendDecodedBlocks(blocks, batch)
+    }
+
+    return blocks
+  }
+
+  private async *readTrackBlockBatches(
+    metadata: ParsedFile,
+    trackNumber: number,
+    signal: AbortSignal
+  ): AsyncGenerator<DecodedBlock[]> {
     const cuePositions = await this.readCuePositions(
       metadata,
       trackNumber,
       signal
     )
 
-    return cuePositions.length === 0
-      ? this.scanForTrack(metadata, trackNumber, signal)
-      : this.readIndexedBlocks({
-          metadata,
-          trackNumber,
-          cuePoints: cuePositions,
-          signal,
-        })
+    if (cuePositions.length === 0) {
+      const blocks = await this.scanForTrack(metadata, trackNumber, signal)
+
+      if (blocks.length > 0) {
+        yield blocks
+      }
+
+      return
+    }
+
+    yield* this.readIndexedBlockBatches({
+      metadata,
+      trackNumber,
+      cuePoints: cuePositions,
+      signal,
+    })
   }
 
   private async readCuePoint({
@@ -2013,14 +2210,14 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     return { trackNumber, clusterPosition, relativePosition, durationTicks }
   }
 
-  private async readIndexedBlocks({
+  private async *readIndexedBlockBatches({
     metadata,
     trackNumber,
     cuePoints,
     signal,
-  }: IndexedCueOptions): Promise<DecodedBlock[]> {
+  }: IndexedCueOptions): AsyncGenerator<DecodedBlock[]> {
     const clusters = [...groupCuePositions(cuePoints)]
-    const blocks: DecodedBlock[] = []
+    let blockCount = 0
     let textBytes = 0
 
     const cueCount = clusters.reduce(
@@ -2053,20 +2250,22 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
         signal,
       })
 
-      for (const clusterBlocks of batchBlocks) {
-        textBytes += this.appendDecodedBlocks(blocks, clusterBlocks)
+      const decodedBlocks = batchBlocks.flat()
 
-        if (textBytes > MAX_SUBTITLE_TEXT_BYTES) {
+      for (const block of decodedBlocks) {
+        blockCount += 1
+        textBytes += block.textBytes
+
+        if (
+          blockCount > MAX_SUBTITLE_CUES ||
+          textBytes > MAX_SUBTITLE_TEXT_BYTES
+        ) {
           throw new MatroskaSubtitleError("limit")
         }
       }
-    }
 
-    if (textBytes > MAX_SUBTITLE_TEXT_BYTES) {
-      throw new MatroskaSubtitleError("limit")
+      yield decodedBlocks
     }
-
-    return blocks
   }
 
   private async readIndexedClusterBatch({

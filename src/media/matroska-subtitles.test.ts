@@ -95,6 +95,7 @@ interface FixtureOptions {
   attachments?: AttachmentFixture[]
   includeCues?: boolean
   paddingBytes?: number
+  cuesPaddingBytes?: number
   clusterPaddingBytes?: number
   clusterPerBlock?: boolean
   unknownSegmentSize?: boolean
@@ -319,6 +320,7 @@ function makeFixture({
   attachments = [],
   includeCues = true,
   paddingBytes = 0,
+  cuesPaddingBytes = 0,
   clusterPaddingBytes = 0,
   clusterPerBlock = false,
   unknownSegmentSize = false,
@@ -417,7 +419,10 @@ function makeFixture({
             }
 
             return cuePoint(block, blockClusterPosition, true)
-          })
+          }),
+          ...(cuesPaddingBytes > 0
+            ? [element(IDS.void, new Uint8Array(cuesPaddingBytes))]
+            : [])
         )
       )
     : new Uint8Array()
@@ -610,6 +615,33 @@ void test("parses multiple S_TEXT/UTF8 tracks and prefers IETF language flags", 
     { startTime: 2, endTime: 3.5, text: "Bonjour" },
   ])
   assert.ok(requests.every((request) => request.header.startsWith("bytes=")))
+})
+
+void test("reads S_TEXT/UTF8 cues from a bounded Cues element over 2 MiB", async () => {
+  const bytes = makeFixture({
+    tracks: [
+      makeTrack({
+        trackNumber: 2,
+        name: "Japanese",
+        language: "jpn",
+        timestamp: 500,
+        cueDurationTicks: 1_000,
+        textBytes: new TextEncoder().encode("日本語 subtitles work"),
+      }),
+    ],
+    cuesPaddingBytes: 2_600_000,
+  })
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/japanese-subtitles.mkv",
+    rangedFetch(bytes, [])
+  )
+
+  const cues = await reader.readCues(2, new AbortController().signal)
+
+  assert.deepEqual(cues, [
+    { startTime: 0.5, endTime: 1.5, text: "日本語 subtitles work" },
+  ])
 })
 
 void test("calls the range fetcher with its global receiver", async () => {
@@ -1189,6 +1221,127 @@ void test("preserves timed ASS and SSA packets, styles, overrides, and metadata"
     })),
     [{ text: ssaPacket, startTime: 0.75, duration: 1.5 }]
   )
+})
+
+void test("streams indexed ASS packets before later cluster reads finish", async () => {
+  const encoder = new TextEncoder()
+
+  const packets = Array.from({ length: 13 }, (_, index) => ({
+    timestamp: (index + 1) * 1_000,
+    textBytes: encoder.encode(
+      `0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Cue ${index}`
+    ),
+    cueDurationTicks: 1_000,
+  }))
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    clusterPaddingBytes: 64 * 1024,
+    tracks: [
+      makeTrack({
+        trackNumber: 2,
+        name: "Streaming ASS",
+        language: "eng",
+        codecId: "S_TEXT/ASS",
+        codecPrivate: encoder.encode("[Script Info]\r\n[Events]\r\n"),
+        blocks: packets,
+      }),
+    ],
+  })
+
+  const clusterOffsets = findElementOffsets(bytes, IDS.cluster)
+  const lastClusterOffset = clusterOffsets.at(-1) ?? 0
+  const cuesOffset = findElementOffsets(bytes, IDS.cues).at(-1) ?? 0
+
+  assert.equal(clusterOffsets.length, packets.length)
+  assert.notEqual(
+    Math.floor(lastClusterOffset / (64 * 1024)),
+    Math.floor(cuesOffset / (64 * 1024))
+  )
+
+  const delayedPage = Math.floor(lastClusterOffset / (64 * 1024)) * (64 * 1024)
+  let startDelayedPage!: () => void
+  let releaseDelayedPage!: () => void
+
+  const delayedPageStarted = new Promise<void>((resolve) => {
+    startDelayedPage = resolve
+  })
+
+  const delayedPageRelease = new Promise<void>((resolve) => {
+    releaseDelayedPage = resolve
+  })
+
+  const fixtureFetch = rangedFetch(bytes, [])
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const range = new Headers(init?.headers).get("Range") ?? ""
+    const start = Number(/^bytes=(\d+)-\d+$/.exec(range)?.[1])
+
+    if (start === delayedPage) {
+      startDelayedPage()
+      await delayedPageRelease
+    }
+
+    return fixtureFetch(input, init)
+  }
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/streaming-ass.mkv",
+    fetcher
+  )
+
+  const stream = reader.streamAssTrack(2, new AbortController().signal)
+  const received: string[] = []
+  const replayed: string[] = []
+  let resolveFirstBatch!: () => void
+
+  const firstBatch = new Promise<void>((resolve) => {
+    resolveFirstBatch = resolve
+  })
+
+  let completed = false
+  let unsubscribeReplay: (() => void) | null = null
+
+  void stream.result.then(
+    () => {
+      completed = true
+    },
+    () => {
+      completed = true
+    }
+  )
+  stream.subscribePackets((batch) => {
+    received.push(...batch.map(({ data }) => new TextDecoder().decode(data)))
+
+    if (received.length >= 12) {
+      resolveFirstBatch()
+    }
+  })
+
+  try {
+    await firstBatch
+    await delayedPageStarted
+    assert.equal(completed, false)
+    assert.equal(received.length, 12)
+
+    unsubscribeReplay = stream.subscribePackets((batch) => {
+      replayed.push(...batch.map(({ data }) => new TextDecoder().decode(data)))
+    })
+
+    assert.deepEqual(replayed, received)
+  } finally {
+    releaseDelayedPage()
+  }
+
+  const result = await stream.result
+  unsubscribeReplay?.()
+
+  assert.equal(result.packets.length, packets.length)
+  assert.deepEqual(
+    received,
+    packets.map(({ textBytes }) => new TextDecoder().decode(textBytes))
+  )
+  assert.deepEqual(replayed, received)
 })
 
 void test("accepts ASS tracks above 10,000 packets within the shared cue limit", async () => {

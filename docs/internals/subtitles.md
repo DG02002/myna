@@ -36,7 +36,9 @@ blocks, malformed UTF-8, or no usable cue duration fail as subtitles instead
 of producing corrupted cues. ASS/SSA use a separate selected-track path for
 `S_TEXT/ASS` and `S_TEXT/SSA`; Phase 8 UTF8 limits and cue rendering stay
 unchanged. The ASS reader passes Matroska `CodecPrivate` and timed packet bytes
-directly to AkariSub/libass. It does not rebuild ASS `Dialogue` lines.
+directly to AkariSub/libass in ordered batches as indexed cluster reads finish.
+Its bounded session retains packets so a renderer recreated during engine
+migration can replay them. It does not rebuild ASS `Dialogue` lines.
 
 ASS reads use 64 KiB range pages, a 48 MiB per-track byte budget, at most 1,024
 range requests, and a 240-second track deadline. UTF8 uses the same deadline

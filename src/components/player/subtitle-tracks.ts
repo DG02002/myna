@@ -11,7 +11,7 @@ import {
 import { MediabunnyMediaAdapter } from "#/media/engines/mediabunny-adapter"
 import {
   createMatroskaSubtitleReader,
-  type MatroskaAssTrackData,
+  type MatroskaAssTrackStream,
   type MatroskaSubtitleReader,
 } from "#/media/matroska-subtitles"
 import {
@@ -26,19 +26,31 @@ export interface SubtitleTracksState {
   selectedTrack: SubtitleTrack | undefined
   addSubtitle: (url: string) => void
   restoreSelection: (id: string | null) => void
-  assTrackData: MatroskaAssTrackData | null
+  assTrackStream: MatroskaAssTrackStream | null
   failSubtitle: (id: string) => void
   embeddedProbeFailed: boolean
 }
 
 type SubtitleMedia = HTMLVideoElement | MediabunnyMediaAdapter
 
-function useEmbeddedSubtitleState() {
-  const [assTrackData, setAssTrackData] = useState<MatroskaAssTrackData | null>(
-    null
-  )
+interface EmbeddedSubtitleLoad {
+  id: string
+  controller: AbortController
+}
 
-  const [assTrackDataId, setAssTrackDataId] = useState<string | null>(null)
+type SetSubtitleTracks = (
+  update: (currentTracks: SubtitleTrack[]) => SubtitleTrack[]
+) => void
+
+type SetAssTrackStream = (stream: MatroskaAssTrackStream | null) => void
+
+type SetAssTrackStreamId = (id: string | null) => void
+
+function useEmbeddedSubtitleState() {
+  const [assTrackStream, setAssTrackStream] =
+    useState<MatroskaAssTrackStream | null>(null)
+
+  const [assTrackStreamId, setAssTrackStreamId] = useState<string | null>(null)
 
   const [nativeBrowserTrackIds, setNativeBrowserTrackIds] = useState<
     Set<string>
@@ -48,10 +60,10 @@ function useEmbeddedSubtitleState() {
   const [embeddedProbeFailed, setEmbeddedProbeFailed] = useState(false)
 
   return {
-    assTrackData,
-    setAssTrackData,
-    assTrackDataId,
-    setAssTrackDataId,
+    assTrackStream,
+    setAssTrackStream,
+    assTrackStreamId,
+    setAssTrackStreamId,
     nativeBrowserTrackIds,
     setNativeBrowserTrackIds,
     reader,
@@ -59,6 +71,206 @@ function useEmbeddedSubtitleState() {
     embeddedProbeFailed,
     setEmbeddedProbeFailed,
   }
+}
+
+function releaseSelectedSubtitle(
+  tracks: SubtitleTrack[],
+  selectedId: string | null,
+  releasedAssTrackId: string | null
+): SubtitleTrack[] {
+  return tracks.map((track) => {
+    const selectedLoadWasCancelled =
+      track.id === selectedId &&
+      track.source.kind === "matroska" &&
+      track.status === "loading"
+
+    const completedAssTrackWasReleased =
+      track.id === releasedAssTrackId &&
+      track.source.kind === "matroska" &&
+      isAssSubtitleCodec(track.source.codecId) &&
+      track.status === "ready"
+
+    return selectedLoadWasCancelled || completedAssTrackWasReleased
+      ? { ...track, status: "available" }
+      : track
+  })
+}
+
+function updateEmbeddedSubtitleTrack({
+  setTracks,
+  id,
+  status,
+  cues,
+}: {
+  setTracks: SetSubtitleTracks
+  id: string
+  status: SubtitleTrack["status"]
+  cues?: SubtitleTrack["cues"]
+}): void {
+  setTracks((currentTracks) =>
+    currentTracks.map((track) => {
+      if (track.id !== id) {
+        return track
+      }
+
+      const updatedTrack = { ...track, status }
+
+      if (cues !== undefined) {
+        updatedTrack.cues = cues
+      }
+
+      return updatedTrack
+    })
+  )
+}
+
+async function loadEmbeddedSubtitleContent({
+  track,
+  reader,
+  signal,
+  setTracks,
+  setAssTrackStream,
+  setAssTrackStreamId,
+}: {
+  track: SubtitleTrack
+  reader: MatroskaSubtitleReader
+  signal: AbortSignal
+  setTracks: SetSubtitleTracks
+  setAssTrackStream: SetAssTrackStream
+  setAssTrackStreamId: SetAssTrackStreamId
+}): Promise<void> {
+  if (track.source.kind !== "matroska") {
+    return
+  }
+
+  if (track.source.codecId === "S_TEXT/UTF8") {
+    const cues = await reader.readCues(track.source.trackNumber, signal)
+
+    if (!signal.aborted) {
+      updateEmbeddedSubtitleTrack({
+        setTracks,
+        id: track.id,
+        status: "ready",
+        cues,
+      })
+    }
+
+    return
+  }
+
+  const stream = reader.streamAssTrack(track.source.trackNumber, signal)
+
+  setAssTrackStream(stream)
+  setAssTrackStreamId(track.id)
+  await stream.result
+
+  if (!signal.aborted) {
+    updateEmbeddedSubtitleTrack({
+      setTracks,
+      id: track.id,
+      status: "ready",
+      cues: [],
+    })
+  }
+}
+
+async function loadEmbeddedSubtitle({
+  track,
+  reader,
+  embeddedLoad,
+  setTracks,
+  setAssTrackStream,
+  setAssTrackStreamId,
+}: {
+  track: SubtitleTrack
+  reader: MatroskaSubtitleReader
+  embeddedLoad: RefObject<EmbeddedSubtitleLoad | null>
+  setTracks: SetSubtitleTracks
+  setAssTrackStream: SetAssTrackStream
+  setAssTrackStreamId: SetAssTrackStreamId
+}): Promise<void> {
+  if (track.source.kind !== "matroska") {
+    return
+  }
+
+  const load = embeddedLoad.current
+
+  if (load === null || load.id !== track.id) {
+    return
+  }
+
+  const { signal } = load.controller
+
+  updateEmbeddedSubtitleTrack({
+    setTracks,
+    id: track.id,
+    status: "loading",
+  })
+
+  try {
+    await loadEmbeddedSubtitleContent({
+      track,
+      reader,
+      signal,
+      setTracks,
+      setAssTrackStream,
+      setAssTrackStreamId,
+    })
+  } catch {
+    if (!signal.aborted) {
+      setAssTrackStream(null)
+      setAssTrackStreamId(null)
+      updateEmbeddedSubtitleTrack({
+        setTracks,
+        id: track.id,
+        status: "failed",
+      })
+    }
+  } finally {
+    if (embeddedLoad.current === load) {
+      embeddedLoad.current = null
+    }
+  }
+}
+
+export function startEmbeddedSubtitleLoad({
+  track,
+  reader,
+  embeddedLoad,
+  setTracks,
+  setAssTrackStream,
+  setAssTrackStreamId,
+}: {
+  track: SubtitleTrack
+  reader: MatroskaSubtitleReader
+  embeddedLoad: RefObject<EmbeddedSubtitleLoad | null>
+  setTracks: SetSubtitleTracks
+  setAssTrackStream: SetAssTrackStream
+  setAssTrackStreamId: SetAssTrackStreamId
+}): Promise<void> | undefined {
+  if (track.source.kind !== "matroska") {
+    return undefined
+  }
+
+  const currentLoad = embeddedLoad.current
+
+  if (currentLoad?.id === track.id) {
+    return undefined
+  }
+
+  currentLoad?.controller.abort()
+
+  const load = { id: track.id, controller: new AbortController() }
+  embeddedLoad.current = load
+
+  return loadEmbeddedSubtitle({
+    track,
+    reader,
+    embeddedLoad,
+    setTracks,
+    setAssTrackStream,
+    setAssTrackStreamId,
+  })
 }
 
 export function useSubtitles({
@@ -77,10 +289,10 @@ export function useSubtitles({
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const {
-    assTrackData,
-    setAssTrackData,
-    assTrackDataId,
-    setAssTrackDataId,
+    assTrackStream,
+    setAssTrackStream,
+    assTrackStreamId,
+    setAssTrackStreamId,
     nativeBrowserTrackIds,
     setNativeBrowserTrackIds,
     reader,
@@ -91,12 +303,7 @@ export function useSubtitles({
 
   const externalLoads = useRef(new Map<string, AbortController>())
 
-  const embeddedLoad = useRef<{
-    id: string
-    controller: AbortController
-  } | null>(null)
-
-  const isMounted = useRef(true)
+  const embeddedLoad = useRef<EmbeddedSubtitleLoad | null>(null)
 
   const registeredTracks = useRef(
     new WeakMap<TextTrackList, TextTrackRegistry>()
@@ -107,9 +314,7 @@ export function useSubtitles({
   }, [tracks])
 
   useEffect(() => {
-    isMounted.current = true
-
-    return () => cleanupSubtitleLoads(externalLoads, embeddedLoad, isMounted)
+    return () => cleanupSubtitleLoads(externalLoads, embeddedLoad)
   }, [])
 
   const addSubtitle = useCallback((url: string) => {
@@ -163,39 +368,43 @@ export function useSubtitles({
 
   const failSubtitle = useCallback(
     (id: string) => {
+      if (embeddedLoad.current?.id === id) {
+        embeddedLoad.current.controller.abort()
+        embeddedLoad.current = null
+      }
+
       setTracks((currentTracks) =>
         currentTracks.map((track) =>
           track.id === id ? { ...track, status: "failed" } : track
         )
       )
-      setAssTrackData(null)
-      setAssTrackDataId(null)
+      setAssTrackStream(null)
+      setAssTrackStreamId(null)
     },
-    [setAssTrackData, setAssTrackDataId]
+    [setAssTrackStream, setAssTrackStreamId]
   )
 
   const selectSubtitle = useCallback(
     (id: string | null) => {
-      if (id !== selectedId && assTrackDataId !== null) {
-        const releasedId = assTrackDataId
+      if (id !== selectedId) {
+        const releasedId = assTrackStreamId
 
-        setAssTrackData(null)
-        setAssTrackDataId(null)
+        embeddedLoad.current?.controller.abort()
+        embeddedLoad.current = null
+
+        if (releasedId !== null) {
+          setAssTrackStream(null)
+          setAssTrackStreamId(null)
+        }
+
         setTracks((currentTracks) =>
-          currentTracks.map((track) =>
-            track.id === releasedId &&
-            track.source.kind === "matroska" &&
-            isAssSubtitleCodec(track.source.codecId) &&
-            track.status === "ready"
-              ? { ...track, status: "available" }
-              : track
-          )
+          releaseSelectedSubtitle(currentTracks, selectedId, releasedId)
         )
       }
 
       setSelectedId(id)
     },
-    [assTrackDataId, selectedId, setAssTrackData, setAssTrackDataId]
+    [assTrackStreamId, selectedId, setAssTrackStream, setAssTrackStreamId]
   )
 
   useEffect(() => {
@@ -291,8 +500,7 @@ export function useSubtitles({
       selectedTrack.source.kind !== "matroska" ||
       selectedTrack.status === "ready" ||
       selectedTrack.status === "failed" ||
-      (!isEmbeddedText && !isEmbeddedAss) ||
-      (isEmbeddedAss && assTrackDataId === selectedId)
+      (!isEmbeddedText && !isEmbeddedAss)
     ) {
       return undefined
     }
@@ -316,87 +524,22 @@ export function useSubtitles({
       }
     }
 
-    const controller = new AbortController()
-    const load = { id: selectedId, controller }
-    embeddedLoad.current = load
+    void startEmbeddedSubtitleLoad({
+      track: selectedTrack,
+      reader,
+      embeddedLoad,
+      setTracks,
+      setAssTrackStream,
+      setAssTrackStreamId,
+    })
 
-    setTracks((currentTracks) =>
-      currentTracks.map((track) =>
-        track.id === selectedId ? { ...track, status: "loading" } : track
-      )
-    )
-
-    const { trackNumber } = selectedTrack.source
-
-    const subtitleLoad = isEmbeddedText
-      ? reader.readCues(trackNumber, controller.signal)
-      : reader.readAssTrack(trackNumber, controller.signal)
-
-    void subtitleLoad
-      .then((result) => {
-        if (!controller.signal.aborted) {
-          if (Array.isArray(result)) {
-            setTracks((currentTracks) =>
-              currentTracks.map((track) =>
-                track.id === selectedId
-                  ? { ...track, status: "ready", cues: result }
-                  : track
-              )
-            )
-
-            return
-          }
-
-          setAssTrackData(result)
-          setAssTrackDataId(selectedId)
-          setTracks((currentTracks) =>
-            currentTracks.map((track) =>
-              track.id === selectedId
-                ? { ...track, status: "ready", cues: [] }
-                : track
-            )
-          )
-        }
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) {
-          setTracks((currentTracks) =>
-            currentTracks.map((track) =>
-              track.id === selectedId ? { ...track, status: "failed" } : track
-            )
-          )
-        }
-      })
-      .finally(() => {
-        if (embeddedLoad.current === load) {
-          embeddedLoad.current = null
-        }
-      })
-
-    return () => {
-      controller.abort()
-
-      if (embeddedLoad.current === load) {
-        embeddedLoad.current = null
-      }
-
-      if (isMounted.current) {
-        setTracks((currentTracks) =>
-          currentTracks.map((track) =>
-            track.id === selectedId && track.status === "loading"
-              ? { ...track, status: "available" }
-              : track
-          )
-        )
-      }
-    }
+    return undefined
   }, [
-    assTrackDataId,
     nativeMediaRef,
     reader,
     selectedId,
-    setAssTrackData,
-    setAssTrackDataId,
+    setAssTrackStream,
+    setAssTrackStreamId,
     useAdvancedEngine,
   ])
 
@@ -449,13 +592,13 @@ export function useSubtitles({
     selectedId !== null &&
     nativeBrowserTrackIds.has(selectedId)
 
-  const selectedAssTrackData =
+  const selectedAssTrackStream =
     selectedTrack?.source.kind === "matroska" &&
     isAssSubtitleCodec(selectedTrack.source.codecId) &&
-    selectedTrack.status === "ready" &&
-    assTrackDataId === selectedId &&
+    selectedTrack.status !== "failed" &&
+    assTrackStreamId === selectedId &&
     !selectedTrackHasNativeRenderer
-      ? assTrackData
+      ? assTrackStream
       : null
 
   return {
@@ -464,7 +607,7 @@ export function useSubtitles({
     selectedTrack,
     addSubtitle,
     restoreSelection: selectSubtitle,
-    assTrackData: selectedAssTrackData,
+    assTrackStream: selectedAssTrackStream,
     failSubtitle,
     embeddedProbeFailed,
   }
@@ -653,11 +796,8 @@ function cleanupSubtitleLoads(
   embeddedLoad: RefObject<{
     id: string
     controller: AbortController
-  } | null>,
-  isMounted: RefObject<boolean>
+  } | null>
 ): void {
-  isMounted.current = false
-
   for (const controller of externalLoads.current.values()) {
     controller.abort()
   }

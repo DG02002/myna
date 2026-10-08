@@ -3,7 +3,7 @@ import { useEffect, useRef } from "react"
 
 import type { MediabunnyMediaAdapter } from "#/media/engines/mediabunny-adapter"
 import type { MediabunnyEngine } from "#/media/engines/mediabunny-engine"
-import type { MatroskaAssTrackData } from "#/media/matroska-subtitles"
+import type { MatroskaAssTrackStream } from "#/media/matroska-subtitles"
 
 const ENGINE_CLOCK_INTERVAL_MS = 1000 / 30
 
@@ -16,9 +16,65 @@ type AssRendererTarget =
     }
   | { kind: "native"; video: HTMLVideoElement; canvas: HTMLCanvasElement }
 
+export function subscribeAssSubtitlePackets({
+  stream,
+  renderer,
+  onFailure,
+}: {
+  stream: MatroskaAssTrackStream
+  renderer: Pick<AkariSubType, "appendSubtitleChunk">
+  onFailure: () => void
+}): () => void {
+  let active = true
+  let unsubscribePackets: (() => void) | null = null
+
+  const unsubscribe = () => {
+    if (!active) {
+      return
+    }
+
+    active = false
+    unsubscribePackets?.()
+    unsubscribePackets = null
+  }
+
+  const appendPackets = (
+    packets: Parameters<
+      Parameters<MatroskaAssTrackStream["subscribePackets"]>[0]
+    >[0]
+  ) => {
+    if (!active) {
+      return
+    }
+
+    try {
+      for (const packet of packets) {
+        renderer.appendSubtitleChunk(
+          packet.data.slice(),
+          packet.startTime,
+          packet.duration
+        )
+      }
+    } catch {
+      unsubscribe()
+      onFailure()
+    }
+  }
+
+  const stopListening = stream.subscribePackets(appendPackets)
+
+  if (active) {
+    unsubscribePackets = stopListening
+  } else {
+    stopListening()
+  }
+
+  return unsubscribe
+}
+
 export function AssSubtitleOverlay({
   trackId,
-  data,
+  stream,
   useAdvancedEngine,
   nativeVideo,
   adapter,
@@ -26,7 +82,7 @@ export function AssSubtitleOverlay({
   onFailure,
 }: {
   trackId: string
-  data: MatroskaAssTrackData
+  stream: MatroskaAssTrackStream
   useAdvancedEngine: boolean
   nativeVideo: HTMLVideoElement | null
   adapter: MediabunnyMediaAdapter | null
@@ -64,15 +120,18 @@ export function AssSubtitleOverlay({
     let active = true
     let failed = false
     let renderer: AkariSubType | null = null
+    let unsubscribePackets: (() => void) | null = null
     let animationFrame: number | null = null
     let lastClockUpdate = 0
 
     const fail = () => {
-      if (failed) {
+      if (!active || failed) {
         return
       }
 
       failed = true
+      unsubscribePackets?.()
+      unsubscribePackets = null
       const failedRenderer = renderer
       renderer = null
       failedRenderer?.removeEventListener("error", fail)
@@ -194,7 +253,10 @@ export function AssSubtitleOverlay({
 
     const initialize = async () => {
       try {
-        const { default: AkariSub } = await import("akarisub")
+        const [{ default: AkariSub }, metadata] = await Promise.all([
+          import("akarisub"),
+          stream.metadata,
+        ])
 
         if (!active) {
           return
@@ -218,7 +280,7 @@ export function AssSubtitleOverlay({
           targetFps: 30,
           libassMemoryLimit: 64,
           useLocalFonts: false,
-          fonts: data.fonts.map((font) => font.slice()),
+          fonts: metadata.fonts.map((font) => font.slice()),
         }
 
         const nextRenderer = new AkariSub(options)
@@ -242,17 +304,19 @@ export function AssSubtitleOverlay({
               renderer.initStreamingTrack({
                 // AkariSub transfers buffers to its worker. Keep the retained
                 // source data intact for renderer recreation and migration.
-                header: data.codecPrivate.slice(),
+                header: metadata.codecPrivate.slice(),
                 format: "matroska",
                 pruneDelay: null,
               })
 
-              for (const packet of data.packets) {
-                renderer.appendSubtitleChunk(
-                  packet.data.slice(),
-                  packet.startTime,
-                  packet.duration
-                )
+              unsubscribePackets = subscribeAssSubtitlePackets({
+                stream,
+                renderer,
+                onFailure: fail,
+              })
+
+              if (!active || failed || renderer === null) {
+                return
               }
 
               attachClock()
@@ -271,6 +335,8 @@ export function AssSubtitleOverlay({
 
     return () => {
       active = false
+      unsubscribePackets?.()
+      unsubscribePackets = null
       detachClock()
 
       if (animationFrame !== null) {
@@ -281,11 +347,11 @@ export function AssSubtitleOverlay({
       renderer?.destroy()
       renderer = null
     }
-  }, [adapter, data, engine, nativeVideo, trackId, useAdvancedEngine])
+  }, [adapter, engine, nativeVideo, stream, trackId, useAdvancedEngine])
 
   return (
     <div
-      className="pointer-events-none absolute inset-0 z-20 [[data-controls-visible]_&]:bottom-20"
+      className="pointer-events-none absolute inset-0 z-20 [[data-controls-visible]_&]:-translate-y-1/8"
       aria-hidden="true"
     >
       <canvas ref={canvasRef} className="h-full w-full object-contain" />
