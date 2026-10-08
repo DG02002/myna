@@ -7,7 +7,10 @@ import type {
 } from "#/media/matroska-subtitles"
 import type { SubtitleTrack } from "#/media/subtitles"
 
-import { subscribeAssSubtitlePackets } from "./ass-subtitle-overlay"
+import {
+  createStreamingAkariSubOptions,
+  subscribeAssSubtitlePackets,
+} from "./ass-subtitle-overlay"
 import { startEmbeddedSubtitleLoad } from "./subtitle-tracks"
 
 type AssPacket = Parameters<
@@ -89,6 +92,24 @@ function createRenderer() {
     },
   }
 }
+
+void test("starts AkariSub with an off-timeline bootstrap event and copied fonts", () => {
+  // SAFETY: The helper only stores this canvas reference; it does not call DOM methods.
+  const canvas = {} as HTMLCanvasElement
+  const font = Uint8Array.of(0, 1, 0, 0)
+  const options = createStreamingAkariSubOptions(canvas, [font])
+
+  assert.equal(options.canvas, canvas)
+  assert.match(options.subContent, /^\[Script Info\]/)
+  assert.match(options.subContent, /^\[V4\+ Styles\]/m)
+  assert.match(options.subContent, /^\[Events\]/m)
+  assert.match(
+    options.subContent,
+    /^Dialogue: 0,99:00:00\.00,99:00:01\.00,Default,,0,0,0,,\s*$/m
+  )
+  assert.notEqual(options.fonts?.[0], font)
+  assert.deepEqual(options.fonts?.[0], font)
+})
 
 function createLoadHarness(stream: MatroskaAssTrackStream) {
   const track: SubtitleTrack = {

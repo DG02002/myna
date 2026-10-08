@@ -7,6 +7,20 @@ import type { MatroskaAssTrackStream } from "#/media/matroska-subtitles"
 
 const ENGINE_CLOCK_INTERVAL_MS = 1000 / 30
 
+const BOOTSTRAP_ASS_SUBTITLE = `[Script Info]
+ScriptType: v4.00+
+PlayResX: 384
+PlayResY: 288
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1,1,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,99:00:00.00,99:00:01.00,Default,,0,0,0,,
+`
+
 type AssRendererTarget =
   | {
       kind: "advanced"
@@ -15,6 +29,26 @@ type AssRendererTarget =
       engine: MediabunnyEngine
     }
   | { kind: "native"; video: HTMLVideoElement; canvas: HTMLCanvasElement }
+
+export function createStreamingAkariSubOptions(
+  canvas: HTMLCanvasElement,
+  fonts: Uint8Array[]
+): AkariSubOptions & { fonts: Uint8Array[]; subContent: string } {
+  return {
+    canvas,
+    onDemandRender: false,
+    offscreenRender: false,
+    targetFps: 30,
+    libassMemoryLimit: 64,
+    useLocalFonts: false,
+    // AkariSub parses subContent during worker startup even when the caller
+    // will use initStreamingTrack. libass rejects an events-free bootstrap
+    // track, so keep one cue far beyond normal media durations until the real
+    // Matroska header replaces it.
+    subContent: BOOTSTRAP_ASS_SUBTITLE,
+    fonts: fonts.map((font) => font.slice()),
+  }
+}
 
 export function subscribeAssSubtitlePackets({
   stream,
@@ -273,15 +307,10 @@ export function AssSubtitleOverlay({
 
         // A manual canvas clock also works for CORS-tainted native video.
         // AkariSub's video-managed clock tries to construct a VideoFrame.
-        const options: AkariSubOptions = {
-          canvas: target.canvas,
-          onDemandRender: false,
-          offscreenRender: false,
-          targetFps: 30,
-          libassMemoryLimit: 64,
-          useLocalFonts: false,
-          fonts: metadata.fonts.map((font) => font.slice()),
-        }
+        const options = createStreamingAkariSubOptions(
+          target.canvas,
+          metadata.fonts
+        )
 
         const nextRenderer = new AkariSub(options)
 
@@ -301,6 +330,8 @@ export function AssSubtitleOverlay({
             }
 
             try {
+              // Queue replacement before packet replay and before attachClock
+              // can send the first render time to AkariSub's worker.
               renderer.initStreamingTrack({
                 // AkariSub transfers buffers to its worker. Keep the retained
                 // source data intact for renderer recreation and migration.
