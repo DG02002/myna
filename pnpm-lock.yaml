@@ -53,6 +53,9 @@ importers:
       cn:
         specifier: ^0.4.0
         version: 0.4.0
+      libbitsub:
+        specifier: 1.12.1
+        version: 1.12.1(hls.js@1.6.7)(react@19.3.0)
       mediabunny:
         specifier: ^1.61.0
         version: 1.61.0
@@ -3287,6 +3290,9 @@ packages:
   '@vitest/utils@4.1.11':
     resolution: {integrity: sha512-zTCVGpyFsGWBhllOyKlTw/vnr6D9qxsfSDyfbyZmTyjHw5N/VuvzHpHoQjm2ZJzn4RJgx5w4r7V0er69CmLgPQ==}
 
+  '@webgpu/types@0.1.74':
+    resolution: {integrity: sha512-lgiI4hbuLcI9unnm2cL/tvCaQU45dp0xcLWJh5uB/9MBGvIA4F8XIk7nSiBeg+K4xWGYwgZKn80LmERI5CxoTA==}
+
   accepts@2.0.0:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
     engines: {node: '>= 0.6'}
@@ -4262,6 +4268,24 @@ packages:
   levn@0.4.1:
     resolution: {integrity: sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ==}
     engines: {node: '>= 0.8.0'}
+
+  libbitsub@1.12.1:
+    resolution: {integrity: sha512-5OzJzT5wufax1IQYGknTC3p8DkkcmZbqpNEMdyqK3BCqrFMgrvaKg3CYBFYaGjkgAuTRgBKP8T9FoTgFP+1/OA==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      hls.js: '>=1.0.0'
+      react: '>=18.0.0'
+      shaka-player: '>=4.0.0'
+      video.js: '>=7.0.0'
+    peerDependenciesMeta:
+      hls.js:
+        optional: true
+      react:
+        optional: true
+      shaka-player:
+        optional: true
+      video.js:
+        optional: true
 
   lightningcss-android-arm64@1.32.0:
     resolution: {integrity: sha512-YK7/ClTt4kAK0vo6w3X+Pnm0D2cf2vPHbhOXdoNti1Ga0al1P4TBZhwjATvjNwLEBCnKvjJc2jQgHXH0NEwlAg==}
@@ -8337,6 +8361,8 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.1
 
+  '@webgpu/types@0.1.74': {}
+
   accepts@2.0.0:
     dependencies:
       mime-types: 3.0.2
@@ -9282,6 +9308,13 @@ snapshots:
     dependencies:
       prelude-ls: 1.2.1
       type-check: 0.4.0
+
+  libbitsub@1.12.1(hls.js@1.6.7)(react@19.3.0):
+    dependencies:
+      '@webgpu/types': 0.1.74
+    optionalDependencies:
+      hls.js: 1.6.7
+      react: 19.3.0
 
   lightningcss-android-arm64@1.32.0:
     optional: true

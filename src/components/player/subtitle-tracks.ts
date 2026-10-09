@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type Dispatch,
@@ -14,6 +15,7 @@ import {
   type MatroskaAssTrackStream,
   type MatroskaSubtitleReader,
 } from "#/media/matroska-subtitles"
+import { PgsSubtitleSession } from "#/media/pgs-subtitle-session"
 import {
   loadSubtitleCues,
   subtitleTrackName,
@@ -27,7 +29,9 @@ export interface SubtitleTracksState {
   addSubtitle: (url: string) => void
   restoreSelection: (id: string | null) => void
   assTrackStream: MatroskaAssTrackStream | null
+  pgsSession: PgsSubtitleSession | null
   failSubtitle: (id: string) => void
+  markSubtitleIncomplete: (id: string) => void
   embeddedProbeFailed: boolean
 }
 
@@ -38,6 +42,65 @@ interface EmbeddedSubtitleLoad {
   controller: AbortController
 }
 
+export class SubtitleLoadManager {
+  private readonly externalLoads = new Map<string, AbortController>()
+
+  private embeddedLoad: EmbeddedSubtitleLoad | null = null
+
+  addExternalLoad(id: string, controller: AbortController): void {
+    this.externalLoads.set(id, controller)
+  }
+
+  removeExternalLoad(id: string): void {
+    this.externalLoads.delete(id)
+  }
+
+  currentEmbeddedLoad(): EmbeddedSubtitleLoad | null {
+    return this.embeddedLoad
+  }
+
+  startEmbeddedLoad(id: string): EmbeddedSubtitleLoad | null {
+    const currentLoad = this.embeddedLoad
+
+    if (currentLoad?.id === id) {
+      return null
+    }
+
+    currentLoad?.controller.abort()
+
+    const load = { id, controller: new AbortController() }
+    this.embeddedLoad = load
+
+    return load
+  }
+
+  cancelEmbeddedLoad(id?: string): void {
+    const currentLoad = this.embeddedLoad
+
+    if (currentLoad === null || (id !== undefined && currentLoad.id !== id)) {
+      return
+    }
+
+    currentLoad.controller.abort()
+    this.embeddedLoad = null
+  }
+
+  clearEmbeddedLoad(load: EmbeddedSubtitleLoad): void {
+    if (this.embeddedLoad === load) {
+      this.embeddedLoad = null
+    }
+  }
+
+  dispose(): void {
+    for (const controller of this.externalLoads.values()) {
+      controller.abort()
+    }
+
+    this.externalLoads.clear()
+    this.cancelEmbeddedLoad()
+  }
+}
+
 type SetSubtitleTracks = (
   update: (currentTracks: SubtitleTrack[]) => SubtitleTrack[]
 ) => void
@@ -45,6 +108,21 @@ type SetSubtitleTracks = (
 type SetAssTrackStream = (stream: MatroskaAssTrackStream | null) => void
 
 type SetAssTrackStreamId = (id: string | null) => void
+
+type SetPgsSession = (session: PgsSubtitleSession | null) => void
+
+type SetPgsTrackSessionId = (id: string | null) => void
+
+interface EmbeddedSubtitleContentInput {
+  track: SubtitleTrack
+  reader: MatroskaSubtitleReader
+  signal: AbortSignal
+  setTracks: SetSubtitleTracks
+  setAssTrackStream: SetAssTrackStream
+  setAssTrackStreamId: SetAssTrackStreamId
+  setPgsSession: SetPgsSession
+  setPgsTrackSessionId: SetPgsTrackSessionId
+}
 
 function useEmbeddedSubtitleState() {
   const [assTrackStream, setAssTrackStream] =
@@ -73,10 +151,60 @@ function useEmbeddedSubtitleState() {
   }
 }
 
+function usePgsSubtitleState() {
+  const [pgsSession, setPgsSession] = useState<PgsSubtitleSession | null>(null)
+
+  const [pgsTrackSessionId, setPgsTrackSessionId] = useState<string | null>(
+    null
+  )
+
+  const pgsSessionRef = useRef<PgsSubtitleSession | null>(null)
+
+  const replacePgsSession = useCallback(
+    (session: PgsSubtitleSession | null) => {
+      const previous = pgsSessionRef.current
+
+      if (previous !== session) {
+        previous?.dispose()
+        pgsSessionRef.current = session
+        setPgsSession(session)
+      }
+    },
+    []
+  )
+
+  const hasPgsSession = useCallback(() => pgsSessionRef.current !== null, [])
+
+  useEffect(() => {
+    return () => {
+      pgsSessionRef.current?.dispose()
+      pgsSessionRef.current = null
+    }
+  }, [])
+
+  return {
+    pgsSession,
+    pgsTrackSessionId,
+    replacePgsSession,
+    setPgsTrackSessionId,
+    hasPgsSession,
+  }
+}
+
+function useSubtitleLoadManager(): SubtitleLoadManager {
+  const manager = useMemo(() => new SubtitleLoadManager(), [])
+
+  useEffect(() => {
+    return () => manager.dispose()
+  }, [manager])
+
+  return manager
+}
+
 function releaseSelectedSubtitle(
   tracks: SubtitleTrack[],
   selectedId: string | null,
-  releasedAssTrackId: string | null
+  releasedStreamTrackId: string | null
 ): SubtitleTrack[] {
   return tracks.map((track) => {
     const selectedLoadWasCancelled =
@@ -85,9 +213,10 @@ function releaseSelectedSubtitle(
       track.status === "loading"
 
     const completedAssTrackWasReleased =
-      track.id === releasedAssTrackId &&
+      track.id === releasedStreamTrackId &&
       track.source.kind === "matroska" &&
-      isAssSubtitleCodec(track.source.codecId) &&
+      (isAssSubtitleCodec(track.source.codecId) ||
+        track.source.codecId === "S_HDMV/PGS") &&
       (track.status === "ready" || track.status === "incomplete")
 
     return selectedLoadWasCancelled || completedAssTrackWasReleased
@@ -188,36 +317,23 @@ async function loadEmbeddedAssSubtitleContent({
   }
 }
 
-async function loadEmbeddedSubtitleContent({
-  track,
-  reader,
-  signal,
-  setTracks,
-  setAssTrackStream,
-  setAssTrackStreamId,
-}: {
-  track: SubtitleTrack
-  reader: MatroskaSubtitleReader
-  signal: AbortSignal
-  setTracks: SetSubtitleTracks
-  setAssTrackStream: SetAssTrackStream
-  setAssTrackStreamId: SetAssTrackStreamId
-}): Promise<void> {
+async function loadEmbeddedSubtitleContent(
+  input: EmbeddedSubtitleContentInput
+): Promise<void> {
+  const { track } = input
+
   if (track.source.kind !== "matroska") {
     return
   }
 
   if (track.source.codecId === "S_TEXT/UTF8") {
-    const cues = await reader.readCues(track.source.trackNumber, signal)
+    await loadEmbeddedUtf8SubtitleContent(input)
 
-    if (!signal.aborted) {
-      updateEmbeddedSubtitleTrack({
-        setTracks,
-        id: track.id,
-        status: "ready",
-        cues,
-      })
-    }
+    return
+  }
+
+  if (track.source.codecId === "S_HDMV/PGS") {
+    await loadEmbeddedPgsSubtitleContent(input)
 
     return
   }
@@ -225,34 +341,87 @@ async function loadEmbeddedSubtitleContent({
   await loadEmbeddedAssSubtitleContent({
     track,
     trackNumber: track.source.trackNumber,
-    reader,
-    signal,
-    setTracks,
-    setAssTrackStream,
-    setAssTrackStreamId,
+    reader: input.reader,
+    signal: input.signal,
+    setTracks: input.setTracks,
+    setAssTrackStream: input.setAssTrackStream,
+    setAssTrackStreamId: input.setAssTrackStreamId,
+  })
+}
+
+async function loadEmbeddedUtf8SubtitleContent(
+  input: EmbeddedSubtitleContentInput
+): Promise<void> {
+  const { track, reader, signal, setTracks } = input
+
+  if (track.source.kind !== "matroska") {
+    return
+  }
+
+  const cues = await reader.readCues(track.source.trackNumber, signal)
+
+  if (!signal.aborted) {
+    updateEmbeddedSubtitleTrack({
+      setTracks,
+      id: track.id,
+      status: "ready",
+      cues,
+    })
+  }
+}
+
+async function loadEmbeddedPgsSubtitleContent(
+  input: EmbeddedSubtitleContentInput
+): Promise<void> {
+  const { track, reader, signal, setPgsSession, setPgsTrackSessionId } = input
+
+  if (track.source.kind !== "matroska") {
+    return
+  }
+
+  const session = new PgsSubtitleSession()
+  const { trackNumber } = track.source
+
+  session.setWindowLoader((targetTime, windowSignal) =>
+    reader.streamPgsWindow(trackNumber, targetTime, windowSignal)
+  )
+  signal.addEventListener("abort", () => session.dispose(), { once: true })
+
+  setPgsSession(session)
+  setPgsTrackSessionId(track.id)
+
+  updateEmbeddedSubtitleTrack({
+    setTracks: input.setTracks,
+    id: track.id,
+    status: "ready",
+    cues: [],
   })
 }
 
 async function loadEmbeddedSubtitle({
   track,
   reader,
-  embeddedLoad,
+  loadManager,
   setTracks,
   setAssTrackStream,
   setAssTrackStreamId,
+  setPgsSession,
+  setPgsTrackSessionId,
 }: {
   track: SubtitleTrack
   reader: MatroskaSubtitleReader
-  embeddedLoad: RefObject<EmbeddedSubtitleLoad | null>
+  loadManager: SubtitleLoadManager
   setTracks: SetSubtitleTracks
   setAssTrackStream: SetAssTrackStream
   setAssTrackStreamId: SetAssTrackStreamId
+  setPgsSession: SetPgsSession
+  setPgsTrackSessionId: SetPgsTrackSessionId
 }): Promise<void> {
   if (track.source.kind !== "matroska") {
     return
   }
 
-  const load = embeddedLoad.current
+  const load = loadManager.currentEmbeddedLoad()
 
   if (load === null || load.id !== track.id) {
     return
@@ -274,11 +443,22 @@ async function loadEmbeddedSubtitle({
       setTracks,
       setAssTrackStream,
       setAssTrackStreamId,
+      setPgsSession,
+      setPgsTrackSessionId,
     })
   } catch {
     if (!signal.aborted) {
       setAssTrackStream(null)
       setAssTrackStreamId(null)
+
+      if (
+        track.source.kind === "matroska" &&
+        track.source.codecId === "S_HDMV/PGS"
+      ) {
+        setPgsSession(null)
+        setPgsTrackSessionId(null)
+      }
+
       updateEmbeddedSubtitleTrack({
         setTracks,
         id: track.id,
@@ -286,49 +466,48 @@ async function loadEmbeddedSubtitle({
       })
     }
   } finally {
-    if (embeddedLoad.current === load) {
-      embeddedLoad.current = null
-    }
+    loadManager.clearEmbeddedLoad(load)
   }
 }
 
 export function startEmbeddedSubtitleLoad({
   track,
   reader,
-  embeddedLoad,
+  loadManager,
   setTracks,
   setAssTrackStream,
   setAssTrackStreamId,
+  setPgsSession,
+  setPgsTrackSessionId,
 }: {
   track: SubtitleTrack
   reader: MatroskaSubtitleReader
-  embeddedLoad: RefObject<EmbeddedSubtitleLoad | null>
+  loadManager: SubtitleLoadManager
   setTracks: SetSubtitleTracks
   setAssTrackStream: SetAssTrackStream
   setAssTrackStreamId: SetAssTrackStreamId
+  setPgsSession: SetPgsSession
+  setPgsTrackSessionId: SetPgsTrackSessionId
 }): Promise<void> | undefined {
   if (track.source.kind !== "matroska" || track.status === "incomplete") {
     return undefined
   }
 
-  const currentLoad = embeddedLoad.current
+  const load = loadManager.startEmbeddedLoad(track.id)
 
-  if (currentLoad?.id === track.id) {
+  if (load === null) {
     return undefined
   }
-
-  currentLoad?.controller.abort()
-
-  const load = { id: track.id, controller: new AbortController() }
-  embeddedLoad.current = load
 
   return loadEmbeddedSubtitle({
     track,
     reader,
-    embeddedLoad,
+    loadManager,
     setTracks,
     setAssTrackStream,
     setAssTrackStreamId,
+    setPgsSession,
+    setPgsTrackSessionId,
   })
 }
 
@@ -344,8 +523,16 @@ export function useSubtitles({
   matroskaUrl: string | null
 }): SubtitleTracksState {
   const [tracks, setTracks] = useState<SubtitleTrack[]>([])
-  const tracksRef = useRef(tracks)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const selectedIdRef = useRef<string | null>(null)
+
+  const {
+    pgsSession,
+    pgsTrackSessionId,
+    replacePgsSession,
+    setPgsTrackSessionId,
+    hasPgsSession,
+  } = usePgsSubtitleState()
 
   const {
     assTrackStream,
@@ -360,76 +547,74 @@ export function useSubtitles({
     setEmbeddedProbeFailed,
   } = useEmbeddedSubtitleState()
 
-  const externalLoads = useRef(new Map<string, AbortController>())
-
-  const embeddedLoad = useRef<EmbeddedSubtitleLoad | null>(null)
+  const loadManager = useSubtitleLoadManager()
 
   const registeredTracks = useRef(
     new WeakMap<TextTrackList, TextTrackRegistry>()
   )
 
-  useEffect(() => {
-    tracksRef.current = tracks
-  }, [tracks])
+  const addSubtitle = useCallback(
+    (url: string) => {
+      const id = crypto.randomUUID()
+      const name = subtitleTrackName(url, tracks.length + 1)
+      const controller = new AbortController()
 
-  useEffect(() => {
-    return () => cleanupSubtitleLoads(externalLoads, embeddedLoad)
-  }, [])
+      loadManager.addExternalLoad(id, controller)
+      setTracks((currentTracks) => [
+        ...currentTracks,
+        {
+          id,
+          ...name,
+          source: { kind: "external" },
+          status: "loading",
+          cues: [],
+        },
+      ])
 
-  const addSubtitle = useCallback((url: string) => {
-    const id = crypto.randomUUID()
-    const name = subtitleTrackName(url, tracksRef.current.length + 1)
-    const controller = new AbortController()
+      void loadSubtitleCues(url, controller.signal)
+        .then((result) => {
+          if (controller.signal.aborted || "aborted" in result) {
+            return
+          }
 
-    externalLoads.current.set(id, controller)
-    setTracks((currentTracks) => [
-      ...currentTracks,
-      {
-        id,
-        ...name,
-        source: { kind: "external" },
-        status: "loading",
-        cues: [],
-      },
-    ])
-
-    void loadSubtitleCues(url, controller.signal)
-      .then((result) => {
-        if (controller.signal.aborted || "aborted" in result) {
-          return
-        }
-
-        setTracks((currentTracks) =>
-          currentTracks.map((track) => {
-            if (track.id !== id) {
-              return track
-            }
-
-            if ("cues" in result) {
-              return { ...track, status: "ready", cues: result.cues }
-            }
-
-            return { ...track, status: "failed" }
-          })
-        )
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) {
           setTracks((currentTracks) =>
-            currentTracks.map((track) =>
-              track.id === id ? { ...track, status: "failed" } : track
-            )
+            currentTracks.map((track) => {
+              if (track.id !== id) {
+                return track
+              }
+
+              if ("cues" in result) {
+                return { ...track, status: "ready", cues: result.cues }
+              }
+
+              return { ...track, status: "failed" }
+            })
           )
-        }
-      })
-      .finally(() => externalLoads.current.delete(id))
-  }, [])
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) {
+            setTracks((currentTracks) =>
+              currentTracks.map((track) =>
+                track.id === id ? { ...track, status: "failed" } : track
+              )
+            )
+          }
+        })
+        .finally(() => loadManager.removeExternalLoad(id))
+    },
+    [loadManager, tracks.length]
+  )
 
   const failSubtitle = useCallback(
     (id: string) => {
-      if (embeddedLoad.current?.id === id) {
-        embeddedLoad.current.controller.abort()
-        embeddedLoad.current = null
+      const activeLoad = loadManager.currentEmbeddedLoad()
+      const activePgsSession = activeLoad?.id === id && hasPgsSession()
+
+      loadManager.cancelEmbeddedLoad(id)
+
+      if (pgsTrackSessionId === id || activePgsSession) {
+        replacePgsSession(null)
+        setPgsTrackSessionId(null)
       }
 
       setTracks((currentTracks) =>
@@ -440,30 +625,71 @@ export function useSubtitles({
       setAssTrackStream(null)
       setAssTrackStreamId(null)
     },
-    [setAssTrackStream, setAssTrackStreamId]
+    [
+      pgsTrackSessionId,
+      hasPgsSession,
+      loadManager,
+      replacePgsSession,
+      setAssTrackStream,
+      setAssTrackStreamId,
+      setPgsTrackSessionId,
+    ]
   )
+
+  const markSubtitleIncomplete = useCallback((id: string) => {
+    updateEmbeddedSubtitleTrack({
+      setTracks,
+      id,
+      status: "incomplete",
+    })
+  }, [])
 
   const selectSubtitle = useCallback(
     (id: string | null) => {
-      if (id !== selectedId) {
-        const releasedId = assTrackStreamId
+      const previousSelectedId = selectedIdRef.current
 
-        embeddedLoad.current?.controller.abort()
-        embeddedLoad.current = null
+      if (id !== previousSelectedId) {
+        const selected = tracks.find((track) => track.id === previousSelectedId)
+
+        const selectedPgsTrack =
+          selected?.source.kind === "matroska" &&
+          selected.source.codecId === "S_HDMV/PGS"
+
+        const releasedId =
+          pgsTrackSessionId ??
+          assTrackStreamId ??
+          (selectedPgsTrack ? previousSelectedId : null)
+
+        loadManager.cancelEmbeddedLoad()
 
         if (releasedId !== null) {
+          if (releasedId === pgsTrackSessionId || selectedPgsTrack) {
+            replacePgsSession(null)
+            setPgsTrackSessionId(null)
+          }
+
           setAssTrackStream(null)
           setAssTrackStreamId(null)
         }
 
         setTracks((currentTracks) =>
-          releaseSelectedSubtitle(currentTracks, selectedId, releasedId)
+          releaseSelectedSubtitle(currentTracks, previousSelectedId, releasedId)
         )
       }
 
+      selectedIdRef.current = id
       setSelectedId(id)
     },
-    [assTrackStreamId, selectedId, setAssTrackStream, setAssTrackStreamId]
+    [
+      assTrackStreamId,
+      loadManager,
+      pgsTrackSessionId,
+      replacePgsSession,
+      setAssTrackStream,
+      setAssTrackStreamId,
+      setPgsTrackSessionId,
+      tracks,
+    ]
   )
 
   useEffect(() => {
@@ -540,9 +766,7 @@ export function useSubtitles({
   }, [matroskaUrl, nativeMediaRef, setEmbeddedProbeFailed, setReader])
 
   useEffect(() => {
-    const selectedTrack = tracksRef.current.find(
-      (track) => track.id === selectedId
-    )
+    const selectedTrack = tracks.find((track) => track.id === selectedId)
 
     const isEmbeddedText =
       selectedTrack?.source.kind === "matroska" &&
@@ -552,6 +776,10 @@ export function useSubtitles({
       selectedTrack?.source.kind === "matroska" &&
       isAssSubtitleCodec(selectedTrack.source.codecId)
 
+    const isEmbeddedPgs =
+      selectedTrack?.source.kind === "matroska" &&
+      selectedTrack.source.codecId === "S_HDMV/PGS"
+
     if (
       selectedId === null ||
       reader === null ||
@@ -560,12 +788,12 @@ export function useSubtitles({
       selectedTrack.status === "ready" ||
       selectedTrack.status === "incomplete" ||
       selectedTrack.status === "failed" ||
-      (!isEmbeddedText && !isEmbeddedAss)
+      (!isEmbeddedText && !isEmbeddedAss && !isEmbeddedPgs)
     ) {
       return undefined
     }
 
-    if (embeddedLoad.current?.id === selectedId) {
+    if (loadManager.currentEmbeddedLoad()?.id === selectedId) {
       return undefined
     }
 
@@ -587,10 +815,12 @@ export function useSubtitles({
     void startEmbeddedSubtitleLoad({
       track: selectedTrack,
       reader,
-      embeddedLoad,
+      loadManager,
       setTracks,
       setAssTrackStream,
       setAssTrackStreamId,
+      setPgsSession: replacePgsSession,
+      setPgsTrackSessionId,
     })
 
     return undefined
@@ -598,8 +828,12 @@ export function useSubtitles({
     nativeMediaRef,
     reader,
     selectedId,
+    loadManager,
     setAssTrackStream,
     setAssTrackStreamId,
+    setPgsTrackSessionId,
+    replacePgsSession,
+    tracks,
     useAdvancedEngine,
   ])
 
@@ -629,7 +863,9 @@ export function useSubtitles({
     })
     applyTextTrackSelection(registry, selectedId)
 
-    const syncSelection = () => syncSelectedTrack(registry, selectSubtitle)
+    const syncSelection = () => {
+      syncSelectedTrack(registry, selectedIdRef.current, selectSubtitle)
+    }
 
     textTracks.addEventListener("change", syncSelection)
     syncSelection()
@@ -661,6 +897,14 @@ export function useSubtitles({
       ? assTrackStream
       : null
 
+  const selectedPgsSession =
+    selectedTrack?.source.kind === "matroska" &&
+    selectedTrack.source.codecId === "S_HDMV/PGS" &&
+    selectedTrack.status !== "failed" &&
+    pgsTrackSessionId === selectedId
+      ? pgsSession
+      : null
+
   return {
     tracks,
     selectedId,
@@ -668,7 +912,9 @@ export function useSubtitles({
     addSubtitle,
     restoreSelection: selectSubtitle,
     assTrackStream: selectedAssTrackStream,
+    pgsSession: selectedPgsSession,
     failSubtitle,
+    markSubtitleIncomplete,
     embeddedProbeFailed,
   }
 }
@@ -763,7 +1009,8 @@ function getSubtitleTextTrack({
   if (
     textTrack === undefined &&
     subtitle.source.kind === "matroska" &&
-    !useAdvancedEngine
+    !useAdvancedEngine &&
+    subtitle.source.codecId !== "S_HDMV/PGS"
   ) {
     textTrack = findNativeTrack(media.textTracks, subtitle, usedBrowserTracks)
 
@@ -776,7 +1023,8 @@ function getSubtitleTextTrack({
   const shouldRegister =
     (subtitle.source.kind === "matroska" &&
       (subtitle.source.codecId === "S_TEXT/UTF8" ||
-        isAssSubtitleCodec(subtitle.source.codecId)) &&
+        isAssSubtitleCodec(subtitle.source.codecId) ||
+        subtitle.source.codecId === "S_HDMV/PGS") &&
       subtitle.status !== "failed") ||
     subtitle.status === "ready"
 
@@ -851,45 +1099,53 @@ function setSubtitleFailed(
   )
 }
 
-function cleanupSubtitleLoads(
-  externalLoads: RefObject<Map<string, AbortController>>,
-  embeddedLoad: RefObject<{
-    id: string
-    controller: AbortController
-  } | null>
-): void {
-  for (const controller of externalLoads.current.values()) {
-    controller.abort()
-  }
-
-  embeddedLoad.current?.controller.abort()
-  externalLoads.current.clear()
-  embeddedLoad.current = null
-}
-
 function applyTextTrackSelection(
   registry: TextTrackRegistry,
   selectedId: string | null
 ): void {
-  for (const [id, textTrack] of registry.registered) {
-    textTrack.mode = id === selectedId ? "showing" : "disabled"
-  }
+  const selectedTrack =
+    selectedId === null
+      ? undefined
+      : (registry.registered.get(selectedId) ??
+        registry.browserMatches.get(selectedId))
 
-  for (const [id, textTrack] of registry.browserMatches) {
-    textTrack.mode = id === selectedId ? "showing" : "disabled"
+  const uniqueTracks = new Set([
+    ...registry.registered.values(),
+    ...registry.browserMatches.values(),
+  ])
+
+  for (const textTrack of uniqueTracks) {
+    const mode = textTrack === selectedTrack ? "showing" : "disabled"
+
+    if (textTrack.mode !== mode) {
+      textTrack.mode = mode
+    }
   }
 }
 
 function syncSelectedTrack(
   registry: TextTrackRegistry,
+  selectedId: string | null,
   selectSubtitle: (id: string | null) => void
 ): void {
   let nextSelectedId: string | null = null
 
-  for (const [id, textTrack] of registry.registered) {
-    if (textTrack.mode === "showing") {
-      nextSelectedId = id
-      break
+  const selectedTrack =
+    selectedId === null
+      ? undefined
+      : (registry.registered.get(selectedId) ??
+        registry.browserMatches.get(selectedId))
+
+  if (selectedTrack?.mode === "showing") {
+    nextSelectedId = selectedId
+  }
+
+  if (nextSelectedId === null) {
+    for (const [id, textTrack] of registry.registered) {
+      if (textTrack.mode === "showing") {
+        nextSelectedId = id
+        break
+      }
     }
   }
 
@@ -900,6 +1156,15 @@ function syncSelectedTrack(
         break
       }
     }
+  }
+
+  // Browsers may dispatch TextTrackList changes between disabling the old
+  // track and showing the new one. Preserve the app's selected track through
+  // that transient empty state; the Playloom captions menu owns the Off action.
+  if (nextSelectedId === null && selectedId !== null) {
+    applyTextTrackSelection(registry, selectedId)
+
+    return
   }
 
   selectSubtitle(nextSelectedId)

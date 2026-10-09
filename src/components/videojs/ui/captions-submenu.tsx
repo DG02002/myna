@@ -10,6 +10,7 @@ import { Text as TextPrimitive } from "@videojs/react"
 import { CaptionsOffIcon as CaptionsOffIconPrimitive } from "@videojs/react/icons"
 import { CaptionsRadioGroup } from "@videojs/react/ui/captions-radio-group"
 
+import { usePlayloomSubtitleTracks } from "#/components/player/subtitle-tracks-context"
 import { MenuChevron } from "#/components/videojs/ui/menu-chevron.tsx"
 import { RadioItem } from "#/components/videojs/ui/radio-item.tsx"
 import { cn } from "#/lib/utils.ts"
@@ -17,6 +18,103 @@ import { cn } from "#/lib/utils.ts"
 export type CaptionsSubmenuProps = Omit<Menu.RootProps, "children">
 
 export function CaptionsSubmenu({ ...props }: CaptionsSubmenuProps = {}) {
+  const subtitles = usePlayloomSubtitleTracks()
+
+  if (subtitles === null || subtitles.tracks.length === 0) {
+    return <NativeCaptionsSubmenu {...props} />
+  }
+
+  const selectedLabel =
+    subtitles.tracks.find((track) => track.id === subtitles.selectedId)
+      ?.label ?? "Off"
+
+  return (
+    <Menu.Root {...props}>
+      <Menu.RadioGroup
+        value={subtitles.selectedId ?? "off"}
+        onValueChange={(value) =>
+          subtitles.selectSubtitle(value === "off" ? null : value)
+        }
+      >
+        <Menu.Trigger
+          className={cn(
+            "group/menu-trigger-item",
+            "relative flex cursor-pointer select-none items-center gap-1.5 rounded-media-menu-item px-2 py-1.5 text-start whitespace-nowrap",
+            "focus-ring-media",
+            "media-highlighted:highlight-media",
+            "focus-visible:outline-media-ring focus-visible:outline-offset-2",
+            "text-shadow-media",
+            "transition-[background-color,color] duration-media-fast ease-in-out",
+            "media-anchored:duration-media-instant media-anchored:media-highlighted:duration-media-slow",
+            "justify-between tabular-nums text-inherit",
+            "data-[availability=unavailable]:hidden data-[availability=unsupported]:hidden",
+            "aria-disabled:pointer-events-none aria-disabled:cursor-not-allowed aria-disabled:opacity-50",
+            "media-anchored:data-highlighted:[anchor-name:--media-menu-item-highlight-anchor]",
+            "media-anchored:media-highlighted:bg-transparent"
+          )}
+        >
+          <CaptionsOffIconPrimitive
+            className={cn(
+              "shrink-0 drop-shadow-media-icon text-media-muted-foreground",
+              "size-media-icon",
+              "group-media-highlighted/menu-trigger-item:text-inherit"
+            )}
+          />
+          <TextPrimitive token={captionsText.key}>
+            {captionsText.text}
+          </TextPrimitive>
+          <span className="ms-auto inline-flex min-w-0 items-center gap-1 ps-2">
+            <span className="max-w-24 truncate opacity-65">
+              {selectedLabel}
+            </span>
+            <MenuChevron />
+          </span>
+        </Menu.Trigger>
+        <Menu.Content
+          className={cn(
+            "[anchor-scope:--media-menu-item-highlight-anchor]",
+            "media-anchored:before:anchor-media-highlight",
+            "media-transitioning:before:hidden",
+            "media-transitioning:[&_*]:before:hidden",
+            "media-anchored:has-data-[highlighted=]:before:duration-0",
+            "not-data-submenu:flex not-data-submenu:flex-col not-data-submenu:gap-0.5",
+            "not-data-submenu:data-child-open:blur-media-hidden",
+            "not-data-submenu:data-child-open:before:hidden",
+            "data-submenu:media-transitioning:pointer-events-none data-submenu:media-transitioning:overflow-hidden",
+            "data-submenu:media-transitioning:blur-media-hidden",
+            "absolute max-h-[inherit] overflow-auto overscroll-none outline-hidden",
+            "transition-[translate,filter] duration-media-menu ease-out",
+            "not-data-submenu:inset-x-1 not-data-submenu:top-1",
+            "not-data-submenu:data-child-open:-translate-x-full",
+            "not-data-submenu:data-child-open:rtl:translate-x-full",
+            "data-submenu:inset-x-0 data-submenu:top-0 data-submenu:z-10 data-submenu:max-h-[inherit] data-submenu:p-1",
+            "data-submenu:media-transitioning:translate-x-full data-submenu:media-transitioning:rtl:-translate-x-full"
+          )}
+        >
+          <Menu.Item className="group/menu-back-item mb-0.5 flex w-full cursor-pointer select-none items-center gap-1.5 rounded-media-menu-item px-2 py-1.5 text-start whitespace-nowrap focus-ring-media media-highlighted:highlight-media focus-visible:outline-media-ring focus-visible:outline-offset-2 text-shadow-media transition-[background-color,color] duration-media-fast ease-in-out">
+            <MenuChevron back />
+            <TextPrimitive token={captionsText.key}>
+              {captionsText.text}
+            </TextPrimitive>
+          </Menu.Item>
+          <Menu.Separator className="my-1 block border-b border-media-border shadow-media-separator" />
+          <div className="flex [max-height:inherit] flex-col gap-0.5">
+            <RadioItem value="off">
+              <span>Off</span>
+            </RadioItem>
+            {subtitles.tracks.map((track) => (
+              <RadioItem key={track.id} value={track.id}>
+                <span>{track.label}</span>
+              </RadioItem>
+            ))}
+          </div>
+        </Menu.Content>
+      </Menu.RadioGroup>
+    </Menu.Root>
+  )
+}
+
+function NativeCaptionsSubmenu({ ...props }: CaptionsSubmenuProps = {}) {
   return (
     <Menu.Root {...props}>
       <CaptionsRadioGroup.Root>

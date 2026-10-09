@@ -1,7 +1,12 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
+import { deflateSync } from "node:zlib"
 
-import { createMatroskaSubtitleReader } from "./matroska-subtitles"
+import {
+  createMatroskaSubtitleReader,
+  MatroskaSubtitleError,
+  type MatroskaPgsPacket,
+} from "./matroska-subtitles"
 
 const IDS = {
   ebml: "1A45DFA3",
@@ -25,7 +30,11 @@ const IDS = {
   flagHearingImpaired: "55AB",
   contentEncodings: "6D80",
   contentEncoding: "6240",
+  contentEncodingOrder: "5031",
+  contentEncodingScope: "5032",
+  contentEncodingType: "5033",
   contentCompression: "5034",
+  contentEncryption: "5035",
   contentCompAlgo: "4254",
   contentCompSettings: "4255",
   codecPrivate: "63A2",
@@ -61,8 +70,8 @@ interface TrackFixture {
   default?: boolean
   forced?: boolean
   hearingImpaired?: boolean
-  contentEncodings?: boolean
-  codecId?: "S_TEXT/UTF8" | "S_TEXT/ASS" | "S_TEXT/SSA"
+  contentEncodings?: ContentEncodingFixture[]
+  codecId?: "S_TEXT/UTF8" | "S_TEXT/ASS" | "S_TEXT/SSA" | "S_HDMV/PGS"
   codecPrivate?: Uint8Array
   attachmentLinks?: number[]
   blockFlags?: number
@@ -70,6 +79,7 @@ interface TrackFixture {
   cueDurationTicks?: number
   timestamp: number
   textBytes: Uint8Array
+  preEncoded?: boolean
   blockGroup?: boolean
   blocks?: TrackBlockFixture[]
 }
@@ -81,6 +91,18 @@ interface TrackBlockFixture {
   blockDurationTicks?: number
   cueDurationTicks?: number
   blockGroup?: boolean
+  preEncoded?: boolean
+}
+
+interface ContentEncodingFixture {
+  order?: number
+  scope?: number
+  type?: number
+  compression?: {
+    algorithm?: number
+    settings?: Uint8Array
+  }
+  encryption?: boolean
 }
 
 interface AttachmentFixture {
@@ -94,9 +116,12 @@ interface FixtureOptions {
   tracks: TrackFixture[]
   attachments?: AttachmentFixture[]
   includeCues?: boolean
+  cueBlockIndices?: number[]
   paddingBytes?: number
   cuesPaddingBytes?: number
+  trailingSegmentVoidBytes?: number
   clusterPaddingBytes?: number
+  clusterPaddingBytesByIndex?: Record<number, number>
   clusterPerBlock?: boolean
   unknownSegmentSize?: boolean
 }
@@ -216,19 +241,54 @@ function trackEntry(track: TrackFixture): Uint8Array {
     )
   }
 
-  if (track.contentEncodings) {
-    const headerStrip = element(
-      IDS.contentEncoding,
-      element(
-        IDS.contentCompression,
-        concat(
-          uintElement(IDS.contentCompAlgo, 3),
-          element(IDS.contentCompSettings, Uint8Array.of(0x20))
-        )
-      )
-    )
+  if (track.contentEncodings !== undefined) {
+    const encodings = track.contentEncodings.map((encoding) => {
+      const encodingFields: Uint8Array[] = []
 
-    fields.push(element(IDS.contentEncodings, headerStrip))
+      if (encoding.order !== undefined) {
+        encodingFields.push(
+          uintElement(IDS.contentEncodingOrder, encoding.order)
+        )
+      }
+
+      if (encoding.scope !== undefined) {
+        encodingFields.push(
+          uintElement(IDS.contentEncodingScope, encoding.scope)
+        )
+      }
+
+      if (encoding.type !== undefined) {
+        encodingFields.push(uintElement(IDS.contentEncodingType, encoding.type))
+      }
+
+      if (encoding.compression !== undefined) {
+        const compressionFields: Uint8Array[] = []
+
+        if (encoding.compression.algorithm !== undefined) {
+          compressionFields.push(
+            uintElement(IDS.contentCompAlgo, encoding.compression.algorithm)
+          )
+        }
+
+        if (encoding.compression.settings !== undefined) {
+          compressionFields.push(
+            element(IDS.contentCompSettings, encoding.compression.settings)
+          )
+        }
+
+        encodingFields.push(
+          element(IDS.contentCompression, concat(...compressionFields))
+        )
+      }
+
+      if (encoding.encryption === true) {
+        encodingFields.push(element(IDS.contentEncryption, new Uint8Array()))
+      }
+
+      return element(IDS.contentEncoding, concat(...encodingFields))
+    })
+
+    fields.push(element(IDS.contentEncodings, concat(...encodings)))
   }
 
   return element(IDS.trackEntry, concat(...fields))
@@ -242,11 +302,30 @@ function blockPayload(
 
   new DataView(timestamp.buffer).setInt16(0, block.timestamp)
 
+  let storedBytes = block.textBytes
+
+  if (!block.preEncoded) {
+    // Matroska decoding reverses this order, so fixtures apply encoders low to high.
+    // oxlint-disable-next-line unicorn/no-array-sort -- Fixture applies encodings in their declared order.
+    for (const encoding of [...(track.contentEncodings ?? [])].sort(
+      (left, right) => (left.order ?? 0) - (right.order ?? 0)
+    )) {
+      if (encoding.compression?.algorithm === 0) {
+        storedBytes = new Uint8Array(deflateSync(storedBytes))
+      } else if (encoding.compression?.algorithm === 3) {
+        const prefix = encoding.compression.settings ?? new Uint8Array()
+
+        assert.deepEqual(storedBytes.subarray(0, prefix.byteLength), prefix)
+        storedBytes = storedBytes.subarray(prefix.byteLength)
+      }
+    }
+  }
+
   return concat(
     Uint8Array.of(0x80 | track.trackNumber),
     timestamp,
     Uint8Array.of(block.blockFlags ?? 0),
-    block.textBytes
+    storedBytes
   )
 }
 
@@ -319,9 +398,12 @@ function makeFixture({
   tracks,
   attachments = [],
   includeCues = true,
+  cueBlockIndices,
   paddingBytes = 0,
   cuesPaddingBytes = 0,
+  trailingSegmentVoidBytes = 0,
   clusterPaddingBytes = 0,
+  clusterPaddingBytesByIndex = {},
   clusterPerBlock = false,
   unknownSegmentSize = false,
 }: FixtureOptions): Uint8Array {
@@ -350,8 +432,14 @@ function makeFixture({
         const clusterIndex = clusters.length
 
         const clusterPadding =
-          clusterPaddingBytes > 0
-            ? element(IDS.void, new Uint8Array(clusterPaddingBytes))
+          (clusterPaddingBytesByIndex[clusterIndex] ?? clusterPaddingBytes) > 0
+            ? element(
+                IDS.void,
+                new Uint8Array(
+                  clusterPaddingBytesByIndex[clusterIndex] ??
+                    clusterPaddingBytes
+                )
+              )
             : new Uint8Array()
 
         blocks.push({
@@ -411,14 +499,21 @@ function makeFixture({
     ? element(
         IDS.cues,
         concat(
-          ...blocks.map((block) => {
+          ...blocks.flatMap((block, index) => {
+            if (
+              cueBlockIndices !== undefined &&
+              !cueBlockIndices.includes(index)
+            ) {
+              return []
+            }
+
             const blockClusterPosition = clusterPositions[block.clusterIndex]
 
             if (blockClusterPosition === undefined) {
               throw new Error("Fixture cluster position is missing.")
             }
 
-            return cuePoint(block, blockClusterPosition, true)
+            return [cuePoint(block, blockClusterPosition, true)]
           }),
           ...(cuesPaddingBytes > 0
             ? [element(IDS.void, new Uint8Array(cuesPaddingBytes))]
@@ -429,13 +524,19 @@ function makeFixture({
 
   const head = includeCues ? seekHead(cuesPosition) : seekHeadTemplate
 
+  const trailingSegmentVoid =
+    trailingSegmentVoidBytes > 0
+      ? element(IDS.void, new Uint8Array(trailingSegmentVoidBytes))
+      : new Uint8Array()
+
   const body = concat(
     head,
     info,
     tracksElement,
     attachmentsElement,
     ...clusters,
-    cues
+    cues,
+    trailingSegmentVoid
   )
 
   const segment = unknownSegmentSize
@@ -533,6 +634,85 @@ function makeTrack(
       overrides.textBytes ?? new TextEncoder().encode("Hello subtitle"),
     ...overrides,
   }
+}
+
+function pgsSegment(
+  type: number,
+  payload: Uint8Array = new Uint8Array()
+): Uint8Array {
+  return concat(
+    Uint8Array.of(
+      type,
+      (payload.byteLength >> 8) & 0xff,
+      payload.byteLength & 0xff
+    ),
+    payload
+  )
+}
+
+function pgsPalette(id: number): Uint8Array {
+  return pgsSegment(0x14, Uint8Array.of(id, 0, 128, 128, 128, 255, 0))
+}
+
+function pgsObject(id: number, version: number): Uint8Array {
+  return pgsSegment(
+    0x15,
+    Uint8Array.of(
+      (id >> 8) & 0xff,
+      id & 0xff,
+      version,
+      0xc0,
+      0,
+      0,
+      8,
+      0,
+      1,
+      0,
+      1,
+      1,
+      1,
+      1,
+      1
+    )
+  )
+}
+
+function pgsWindow(id: number): Uint8Array {
+  return pgsSegment(0x17, Uint8Array.of(1, id, 0, 0, 0, 0, 0, 1, 0, 1))
+}
+
+function pgsPresentation(
+  state: number,
+  paletteId: number,
+  references: Array<{ objectId: number; windowId: number }>
+): Uint8Array {
+  const payload = new Uint8Array(11 + references.length * 8)
+  const view = new DataView(payload.buffer)
+
+  view.setUint16(0, 1)
+  view.setUint16(2, 1)
+  payload[7] = state
+  payload[9] = paletteId
+  payload[10] = references.length
+
+  references.forEach(({ objectId, windowId }, index) => {
+    const offset = 11 + index * 8
+
+    view.setUint16(offset, objectId)
+    payload[offset + 2] = windowId
+    view.setUint16(offset + 4, 0)
+    view.setUint16(offset + 6, 0)
+  })
+
+  return pgsSegment(0x16, payload)
+}
+
+function pgsDisplaySet(segments: Uint8Array[]): Uint8Array {
+  return concat(...segments, pgsSegment(0x80))
+}
+
+function isLimitError(error: Error): boolean {
+  return error instanceof MatroskaSubtitleError && error.kind === "limit"
 }
 
 void test("parses multiple S_TEXT/UTF8 tracks and prefers IETF language flags", async () => {
@@ -642,6 +822,69 @@ void test("reads S_TEXT/UTF8 cues from a bounded Cues element over 2 MiB", async
   assert.deepEqual(cues, [
     { startTime: 0.5, endTime: 1.5, text: "日本語 subtitles work" },
   ])
+})
+
+void test("stops the Cue index at Cues when another Segment element follows", async () => {
+  const bytes = makeFixture({
+    tracks: [
+      makeTrack({
+        trackNumber: 2,
+        name: "English",
+        language: "eng",
+        cueDurationTicks: 1_000,
+      }),
+    ],
+    cuesPaddingBytes: 1,
+    trailingSegmentVoidBytes: 8,
+  })
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/trailing-segment-element.mkv",
+    rangedFetch(bytes, [])
+  )
+
+  assert.deepEqual(await reader.readCues(2, new AbortController().signal), [
+    { startTime: 0.5, endTime: 1.5, text: "Hello subtitle" },
+  ])
+})
+
+void test("reads sparse SRT clusters within its bounded track budget", async () => {
+  const blocks = Array.from({ length: 1_100 }, (_, index) => ({
+    timestamp: index + 1,
+    cueDurationTicks: 1,
+    textBytes: new TextEncoder().encode(`cue ${index + 1}`),
+  }))
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    clusterPaddingBytes: 8 * 1024,
+    tracks: [
+      makeTrack({
+        trackNumber: 2,
+        name: "English",
+        language: "eng",
+        blocks,
+      }),
+    ],
+  })
+
+  const requests: RecordedRange[] = []
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/sparse-srt.mkv",
+    rangedFetch(bytes, requests)
+  )
+
+  const cues = await reader.readCues(2, new AbortController().signal)
+
+  assert.equal(cues.length, blocks.length)
+  assert.equal(cues[0]?.text, "cue 1")
+  assert.equal(cues.at(-1)?.text, "cue 1100")
+  assert.ok(requests.length > 1024)
+  assert.ok(
+    requests.reduce((total, request) => total + request.bytes, 0) <
+      16 * 1024 * 1024
+  )
 })
 
 void test("calls the range fetcher with its global receiver", async () => {
@@ -756,7 +999,7 @@ void test("rejects missing durations, laced blocks, encoded tracks, and invalid 
       trackNumber: 4,
       name: "Encoded",
       language: "deu",
-      contentEncodings: true,
+      contentEncodings: [{ type: 1, encryption: true }],
       cueDurationTicks: 1_000,
     }),
     makeTrack({
@@ -780,6 +1023,106 @@ void test("rejects missing durations, laced blocks, encoded tracks, and invalid 
   await assert.rejects(reader.readCues(3, signal), /unsupported/)
   await assert.rejects(reader.readCues(4, signal), /unsupported/)
   await assert.rejects(reader.readCues(5, signal), /invalid/)
+})
+
+void test("restores zlib and ordered header-stripping subtitle encodings", async () => {
+  const prefix = Uint8Array.of(0x20)
+
+  const tracks = [
+    makeTrack({
+      trackNumber: 2,
+      name: "Zlib",
+      language: "eng",
+      contentEncodings: [{ compression: { algorithm: 0 } }],
+      cueDurationTicks: 1_000,
+      textBytes: new TextEncoder().encode("Compressed subtitle"),
+    }),
+    makeTrack({
+      trackNumber: 3,
+      name: "Header stripping after zlib",
+      language: "fra",
+      contentEncodings: [
+        { order: 0, compression: { algorithm: 3, settings: prefix } },
+        { order: 1, compression: { algorithm: 0 } },
+      ],
+      cueDurationTicks: 1_000,
+      textBytes: new TextEncoder().encode(" Header stripped subtitle"),
+    }),
+  ]
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/encoded-text.mkv",
+    rangedFetch(makeFixture({ tracks }), [])
+  )
+
+  const { signal } = new AbortController()
+
+  await reader.probe(signal)
+
+  assert.deepEqual(await reader.readCues(2, signal), [
+    { startTime: 0.5, endTime: 1.5, text: "Compressed subtitle" },
+  ])
+  assert.deepEqual(await reader.readCues(3, signal), [
+    { startTime: 0.5, endTime: 1.5, text: "Header stripped subtitle" },
+  ])
+})
+
+void test("rejects malformed, oversized, encrypted, and unsupported encodings", async () => {
+  const tracks = [
+    makeTrack({
+      trackNumber: 2,
+      name: "Malformed zlib",
+      language: "eng",
+      contentEncodings: [{ compression: { algorithm: 0 } }],
+      cueDurationTicks: 1_000,
+      textBytes: Uint8Array.of(0x78, 0x9c, 0xff, 0xff),
+      preEncoded: true,
+    }),
+    makeTrack({
+      trackNumber: 3,
+      name: "Oversized expansion",
+      language: "fra",
+      contentEncodings: [{ compression: { algorithm: 0 } }],
+      cueDurationTicks: 1_000,
+      textBytes: new Uint8Array(64 * 1024 + 1).fill(0x41),
+    }),
+    makeTrack({
+      trackNumber: 4,
+      name: "Encrypted",
+      language: "deu",
+      contentEncodings: [{ type: 1, encryption: true }],
+      cueDurationTicks: 1_000,
+    }),
+    makeTrack({
+      trackNumber: 5,
+      name: "Codec-private scope",
+      language: "spa",
+      contentEncodings: [{ scope: 2, compression: { algorithm: 0 } }],
+      cueDurationTicks: 1_000,
+    }),
+    makeTrack({
+      trackNumber: 6,
+      name: "Unknown compression",
+      language: "ita",
+      contentEncodings: [{ compression: { algorithm: 7 } }],
+      cueDurationTicks: 1_000,
+    }),
+  ]
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/invalid-encodings.mkv",
+    rangedFetch(makeFixture({ tracks }), [])
+  )
+
+  const { signal } = new AbortController()
+
+  await reader.probe(signal)
+
+  await assert.rejects(reader.readCues(2, signal), { kind: "invalid" })
+  await assert.rejects(reader.readCues(3, signal), { kind: "limit" })
+  await assert.rejects(reader.readCues(4, signal), { kind: "unsupported" })
+  await assert.rejects(reader.readCues(5, signal), { kind: "unsupported" })
+  await assert.rejects(reader.readCues(6, signal), { kind: "unsupported" })
 })
 
 void test("stops on truncated input and servers that ignore Range", async () => {
@@ -866,12 +1209,64 @@ void test("falls back to proxy byte ranges when direct CORS reads fail", async (
 
   await reader.probe(new AbortController().signal)
 
-  assert.equal(requests.length, 2)
+  assert.equal(requests.length, 4)
   assert.ok(requests[0]?.header.startsWith("bytes="))
   assert.ok(requests[1]?.url.startsWith("/api/media-proxy?url="))
+  assert.ok(requests[2]?.header.startsWith("bytes="))
+  assert.ok(requests[3]?.url.startsWith("/api/media-proxy?url="))
   assert.deepEqual(await reader.readCues(2, new AbortController().signal), [
     { startTime: 0.5, endTime: 1.5, text: "Hello subtitle" },
   ])
+})
+
+void test("retries every in-flight Cue index page after a concurrent CORS fallback", async () => {
+  const blocks = Array.from({ length: 4_096 }, () => ({
+    // Keep the signed Block relative timestamp in range while making the
+    // generated Cue index large enough to span multiple 64 KiB reads.
+    timestamp: 1_000,
+    textBytes: new TextEncoder().encode("Cue"),
+    cueDurationTicks: 1_000,
+  }))
+
+  const bytes = makeFixture({
+    tracks: [
+      makeTrack({
+        trackNumber: 2,
+        name: "English",
+        language: "eng",
+        blocks,
+      }),
+    ],
+  })
+
+  const requests: RecordedRange[] = []
+  const proxyFetch = rangedFetch(bytes, requests)
+  let directReads = 0
+  let proxyReads = 0
+
+  const fetcher: typeof fetch = async (input, init) => {
+    if (inputUrl(input).startsWith("https://")) {
+      directReads += 1
+      await Promise.resolve()
+      throw new TypeError("CORS blocked")
+    }
+
+    proxyReads += 1
+
+    return proxyFetch(input, init)
+  }
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/large-cue-index.mkv",
+    fetcher
+  )
+
+  const cues = await reader.readCues(2, new AbortController().signal)
+
+  assert.equal(cues.length, blocks.length)
+  assert.ok(directReads >= 3)
+  assert.ok(proxyReads >= 4)
+  assert.ok(requests.some((request) => request.bytes === 64 * 1024))
 })
 
 void test("recovers one dropped proxy range without retrying malformed responses", async () => {
@@ -912,7 +1307,7 @@ void test("recovers one dropped proxy range without retrying malformed responses
   assert.deepEqual(await reader.readCues(2, new AbortController().signal), [
     { startTime: 0.5, endTime: 1.5, text: "Hello subtitle" },
   ])
-  assert.equal(proxyAttempts, 3)
+  assert.equal(proxyAttempts, 4)
 
   let invalidAttempts = 0
 
@@ -992,7 +1387,7 @@ void test("retries a request deadline without treating it as source cancellation
   assert.deepEqual(await cues, [
     { startTime: 0.5, endTime: 1.5, text: "Hello subtitle" },
   ])
-  assert.equal(proxyAttempts, 3)
+  assert.equal(proxyAttempts, 4)
 })
 
 void test("cancellation prevents proxy retry after the source changes", async () => {
@@ -2058,7 +2453,7 @@ void test("fails ASS tracks for missing headers, malformed packets, lacing, enco
       language: "spa",
       codecId: "S_TEXT/SSA",
       codecPrivate: validHeader,
-      contentEncodings: true,
+      contentEncodings: [{ type: 1, encryption: true }],
       cueDurationTicks: 1_000,
     }),
     makeTrack({
@@ -2150,4 +2545,784 @@ void test("rejects oversized ASS codec private data and linked fonts", async () 
     oversizedFontReader.readAssTrack(2, new AbortController().signal),
     /limit/
   )
+})
+
+void test("streams binary PGS blocks without CodecPrivate or BlockDuration", async () => {
+  const firstSegment = Uint8Array.of(0x14, 0, 2, 0, 0)
+  const endSegment = Uint8Array.of(0x80, 0, 0)
+  const secondSegment = Uint8Array.of(0x16, 0, 2, 0, 0)
+  const requests: RecordedRange[] = []
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-track.mkv",
+    rangedFetch(
+      makeFixture({
+        clusterPerBlock: true,
+        tracks: [
+          makeTrack({
+            trackNumber: 7,
+            name: "PGS 日本語",
+            language: "jpn",
+            codecId: "S_HDMV/PGS",
+            forced: true,
+            blocks: [
+              {
+                timestamp: 100,
+                textBytes: concat(firstSegment, endSegment),
+              },
+              {
+                timestamp: 250,
+                textBytes: secondSegment,
+                blockGroup: true,
+                blockDurationTicks: 2_500,
+              },
+            ],
+          }),
+        ],
+      }),
+      requests
+    )
+  )
+
+  const { signal } = new AbortController()
+  const tracks = await reader.probe(signal)
+
+  assert.deepEqual(
+    tracks.map(({ id, codecId, label, language, flags }) => ({
+      id,
+      codecId,
+      label,
+      language,
+      flags,
+    })),
+    [
+      {
+        id: "matroska-7",
+        codecId: "S_HDMV/PGS",
+        label: "PGS 日本語",
+        language: "jpn",
+        flags: {
+          default: true,
+          forced: true,
+          hearingImpaired: false,
+          visualImpaired: false,
+          textDescriptions: false,
+          commentary: false,
+          original: false,
+        },
+      },
+    ]
+  )
+
+  const packets = []
+
+  for await (const packet of reader.streamPgsTrack(7, signal)) {
+    packets.push(packet)
+  }
+
+  assert.deepEqual(
+    packets.map(({ data, startTime, duration }) => ({
+      data: [...data],
+      startTime,
+      duration,
+    })),
+    [
+      { data: [...firstSegment], startTime: 0.1, duration: null },
+      { data: [...endSegment], startTime: 0.1, duration: null },
+      { data: [...secondSegment], startTime: 0.25, duration: 2.5 },
+    ]
+  )
+  assert.deepEqual(
+    packets.map((packet) => packet.location.segmentOffset),
+    [0, firstSegment.byteLength, 0]
+  )
+  assert.ok(packets.every((packet) => packet.location.clusterPosition > 0))
+  assert.ok(requests.length > 0)
+})
+
+void test("inflates zlib-compressed PGS blocks before segment parsing", async () => {
+  const segment = Uint8Array.of(0x14, 0, 2, 0, 0)
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-zlib.mkv",
+    rangedFetch(
+      makeFixture({
+        clusterPerBlock: true,
+        tracks: [
+          makeTrack({
+            trackNumber: 7,
+            name: "PGS English",
+            language: "eng",
+            codecId: "S_HDMV/PGS",
+            contentEncodings: [{ compression: { algorithm: 0 } }],
+            blocks: [{ timestamp: 100, textBytes: segment }],
+          }),
+        ],
+      }),
+      []
+    )
+  )
+
+  const { signal } = new AbortController()
+
+  await reader.probe(signal)
+
+  const packets = []
+
+  for await (const packet of reader.streamPgsTrack(7, signal)) {
+    packets.push(packet)
+  }
+
+  assert.equal(packets.length, 1)
+  assert.deepEqual(packets[0]?.data, segment)
+})
+
+void test("loads a zlib PGS window from a verified boundary without earlier A/V", async () => {
+  const epoch = pgsDisplaySet([
+    pgsPalette(0),
+    pgsObject(1, 0),
+    pgsWindow(0),
+    pgsPresentation(0x80, 0, [{ objectId: 1, windowId: 0 }]),
+  ])
+
+  const omittedStateUpdate = pgsDisplaySet([pgsPalette(0)])
+
+  const target = pgsDisplaySet([
+    pgsPresentation(0, 0, [{ objectId: 1, windowId: 0 }]),
+  ])
+
+  const clear = pgsDisplaySet([pgsPresentation(0, 0, [])])
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    clusterPaddingBytesByIndex: { 0: 8 * 1024 * 1024 },
+    cueBlockIndices: [1, 3, 4],
+    tracks: [
+      makeTrack({
+        trackNumber: 2,
+        name: "Video placeholder",
+        language: "und",
+        codecId: "S_TEXT/UTF8",
+        blocks: [{ timestamp: 0, textBytes: Uint8Array.of(0) }],
+      }),
+      makeTrack({
+        trackNumber: 7,
+        name: "PGS window",
+        language: "eng",
+        codecId: "S_HDMV/PGS",
+        contentEncodings: [{ compression: { algorithm: 0 } }],
+        blocks: [
+          { timestamp: 8_000, textBytes: epoch },
+          { timestamp: 9_000, textBytes: omittedStateUpdate },
+          { timestamp: 10_000, textBytes: target },
+          { timestamp: 11_000, textBytes: clear },
+        ],
+      }),
+    ],
+  })
+
+  const requests: RecordedRange[] = []
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-target-window.mkv",
+    rangedFetch(bytes, requests)
+  )
+
+  const events = []
+
+  for await (const event of reader.streamPgsWindow(
+    7,
+    10,
+    new AbortController().signal
+  )) {
+    events.push(event)
+  }
+
+  assert.deepEqual(events[0], { kind: "boundary", boundaryTime: 8 })
+  assert.deepEqual(events.at(-1), {
+    kind: "coverage",
+    coverageTime: 11,
+    complete: false,
+  })
+  assert.ok(
+    requests.length < 32,
+    `Expected the PGS window to reuse bounded range pages; got ${requests.length} requests.`
+  )
+  assert.deepEqual(
+    events
+      .flatMap((event) => (event.kind === "packet" ? [event.packet] : []))
+      .map(({ startTime, data }) => [startTime, data[0]]),
+    [
+      ...[0x14, 0x15, 0x17, 0x16, 0x80].map((type) => [8, type]),
+      ...[0x14, 0x80].map((type) => [9, type]),
+      ...[0x16, 0x80].map((type) => [10, type]),
+      ...[0x16, 0x80].map((type) => [11, type]),
+    ]
+  )
+
+  const [leadingCluster, epochCluster] = findElementOffsets(bytes, IDS.cluster)
+
+  assert.notEqual(leadingCluster, undefined)
+  assert.notEqual(epochCluster, undefined)
+
+  const firstEpochPage =
+    Math.floor((epochCluster ?? 0) / (64 * 1024)) * (64 * 1024)
+
+  const gapPageReads = requests.filter(({ header }) => {
+    const match = /^bytes=(\d+)-\d+$/.exec(header)
+    const start = match === null ? -1 : Number(match[1])
+
+    return start > (leadingCluster ?? 0) && start < (epochCluster ?? 0)
+  })
+
+  assert.ok(
+    gapPageReads.length <= 1 &&
+      gapPageReads.every(({ header, bytes: byteLength }) => {
+        const match = /^bytes=(\d+)-\d+$/.exec(header)
+
+        return (
+          (match === null ? -1 : Number(match[1])) === firstEpochPage &&
+          byteLength <= 64 * 1024
+        )
+      }),
+    `Expected only the page containing the verified epoch, got ${gapPageReads.map(({ header }) => header).join(", ")}.`
+  )
+})
+
+void test("covers multiple PGS compositions in one bounded window", async () => {
+  const epoch = pgsDisplaySet([
+    pgsPalette(0),
+    pgsObject(1, 0),
+    pgsWindow(0),
+    pgsPresentation(0x80, 0, [{ objectId: 1, windowId: 0 }]),
+  ])
+
+  const composition = pgsDisplaySet([
+    pgsPresentation(0, 0, [{ objectId: 1, windowId: 0 }]),
+  ])
+
+  const cueBlockIndices = Array.from({ length: 41 }, (_, index) => index)
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    cueBlockIndices,
+    tracks: [
+      makeTrack({
+        trackNumber: 7,
+        name: "PGS window coverage",
+        language: "eng",
+        codecId: "S_HDMV/PGS",
+        blocks: [
+          { timestamp: 0, textBytes: epoch },
+          ...Array.from({ length: 40 }, (_, index) => ({
+            timestamp: (index + 1) * 1_000,
+            textBytes: composition,
+          })),
+        ],
+      }),
+    ],
+  })
+
+  const requests: RecordedRange[] = []
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-window-coverage.mkv",
+    rangedFetch(bytes, requests)
+  )
+
+  const events = []
+
+  for await (const event of reader.streamPgsWindow(
+    7,
+    0,
+    new AbortController().signal
+  )) {
+    events.push(event)
+  }
+
+  assert.deepEqual(events[0], { kind: "boundary", boundaryTime: 0 })
+  assert.deepEqual(events.at(-1), {
+    kind: "coverage",
+    coverageTime: 10,
+    complete: false,
+  })
+  assert.ok(
+    events.filter((event) => event.kind === "packet").length >= 20,
+    "Expected the window to include the state transitions before its coverage edge."
+  )
+  assert.ok(
+    requests.length < 32,
+    `Expected the bounded PGS window to reuse range pages; got ${requests.length} requests.`
+  )
+
+  const firstReadRequestCount = requests.length
+  const repeatedEvents = []
+
+  for await (const event of reader.streamPgsWindow(
+    7,
+    0,
+    new AbortController().signal
+  )) {
+    repeatedEvents.push(event)
+  }
+
+  assert.deepEqual(repeatedEvents, events)
+  assert.equal(
+    requests.length,
+    firstReadRequestCount,
+    "Expected a repeated window to reuse the reader's bounded PGS page cache."
+  )
+})
+
+void test("restarts the shared PGS Cue index read after a seek cancels it", async () => {
+  const epoch = pgsDisplaySet([
+    pgsPalette(0),
+    pgsObject(1, 0),
+    pgsWindow(0),
+    pgsPresentation(0x80, 0, [{ objectId: 1, windowId: 0 }]),
+  ])
+
+  const target = pgsDisplaySet([
+    pgsPresentation(0, 0, [{ objectId: 1, windowId: 0 }]),
+  ])
+
+  const clear = pgsDisplaySet([pgsPresentation(0, 0, [])])
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    cueBlockIndices: [0, 1, 2],
+    tracks: [
+      makeTrack({
+        trackNumber: 7,
+        name: "PGS seek cancellation",
+        language: "eng",
+        codecId: "S_HDMV/PGS",
+        blocks: [
+          { timestamp: 8_000, textBytes: epoch },
+          { timestamp: 10_000, textBytes: target },
+          { timestamp: 11_000, textBytes: clear },
+        ],
+      }),
+    ],
+  })
+
+  const requests: RecordedRange[] = []
+  const fixtureFetch = rangedFetch(bytes, requests)
+  let stallNextRead = false
+  let cueReadStarted!: () => void
+
+  const cueReadStartedPromise = new Promise<void>((resolve) => {
+    cueReadStarted = resolve
+  })
+
+  let rangeAttempts = 0
+
+  const fetcher: typeof fetch = async (input, init) => {
+    rangeAttempts += 1
+
+    if (stallNextRead) {
+      stallNextRead = false
+      cueReadStarted()
+
+      await new Promise<void>((_resolve, reject) => {
+        const signal = init?.signal
+
+        const abort = () =>
+          reject(new DOMException("The request was aborted.", "AbortError"))
+
+        if (signal?.aborted) {
+          abort()
+        } else {
+          signal?.addEventListener("abort", abort, { once: true })
+        }
+      })
+    }
+
+    return fixtureFetch(input, init)
+  }
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-cue-cancel.mkv",
+    fetcher
+  )
+
+  await reader.probe(new AbortController().signal)
+  stallNextRead = true
+
+  const firstController = new AbortController()
+  const firstStream = reader.streamPgsWindow(7, 10, firstController.signal)
+  const firstIterator = firstStream[Symbol.asyncIterator]()
+
+  const firstAttempt = firstIterator.next().then(
+    (value) => ({ value, error: null }),
+    (error: MatroskaSubtitleError) => ({ value: null, error })
+  )
+
+  await cueReadStartedPromise
+  firstController.abort()
+
+  const firstResult = await firstAttempt
+
+  assert.ok(firstResult.error instanceof MatroskaSubtitleError)
+  assert.equal(firstResult.error.kind, "aborted")
+
+  const secondEvents = []
+
+  for await (const event of reader.streamPgsWindow(
+    7,
+    10,
+    new AbortController().signal
+  )) {
+    secondEvents.push(event)
+  }
+
+  assert.deepEqual(secondEvents[0], { kind: "boundary", boundaryTime: 8 })
+  assert.ok(rangeAttempts >= 2)
+  assert.ok(requests.length > 0)
+})
+
+void test("reads PGS state packets from an unindexed cluster between CuePoints", async () => {
+  const epoch = pgsDisplaySet([
+    pgsPalette(0),
+    pgsObject(1, 0),
+    pgsWindow(0),
+    pgsPresentation(0x80, 0, [{ objectId: 1, windowId: 0 }]),
+  ])
+
+  const acquisition = pgsDisplaySet([
+    pgsPalette(1),
+    pgsObject(1, 1),
+    pgsWindow(1),
+    pgsPresentation(0x40, 1, []),
+  ])
+
+  const dependentComposition = pgsDisplaySet([
+    pgsPresentation(0, 1, [{ objectId: 1, windowId: 1 }]),
+  ])
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-sparse-state.mkv",
+    rangedFetch(
+      makeFixture({
+        clusterPerBlock: true,
+        cueBlockIndices: [0, 2],
+        tracks: [
+          makeTrack({
+            trackNumber: 7,
+            name: "PGS sparse state",
+            language: "eng",
+            codecId: "S_HDMV/PGS",
+            blocks: [
+              { timestamp: 100, textBytes: epoch },
+              { timestamp: 200, textBytes: acquisition },
+              {
+                timestamp: 300,
+                textBytes: dependentComposition,
+                cueDurationTicks: 4_000,
+              },
+            ],
+          }),
+        ],
+      }),
+      []
+    )
+  )
+
+  const packets = []
+
+  for await (const packet of reader.streamPgsTrack(
+    7,
+    new AbortController().signal
+  )) {
+    packets.push(packet)
+  }
+
+  assert.deepEqual(
+    packets.map(({ startTime, data, duration }) => ({
+      startTime,
+      type: data[0],
+      duration,
+    })),
+    [
+      ...[0.1, 0.1, 0.1, 0.1, 0.1].map((startTime, index) => ({
+        startTime,
+        type: [0x14, 0x15, 0x17, 0x16, 0x80][index],
+        duration: null,
+      })),
+      ...[0.2, 0.2, 0.2, 0.2, 0.2].map((startTime, index) => ({
+        startTime,
+        type: [0x14, 0x15, 0x17, 0x16, 0x80][index],
+        duration: null,
+      })),
+      ...[0.3, 0.3].map((startTime, index) => ({
+        startTime,
+        type: [0x16, 0x80][index],
+        duration: 4,
+      })),
+    ]
+  )
+})
+
+void test("reads PGS clusters omitted at the leading and trailing Cue boundaries", async () => {
+  const leading = pgsDisplaySet([pgsPalette(0)])
+  const indexed = pgsDisplaySet([pgsPalette(1)])
+  const trailing = pgsDisplaySet([pgsSegment(0x16)])
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-leading-trailing.mkv",
+    rangedFetch(
+      makeFixture({
+        clusterPerBlock: true,
+        cueBlockIndices: [1],
+        tracks: [
+          makeTrack({
+            trackNumber: 7,
+            name: "PGS boundaries",
+            language: "eng",
+            codecId: "S_HDMV/PGS",
+            blocks: [
+              { timestamp: 100, textBytes: leading },
+              {
+                timestamp: 200,
+                textBytes: indexed,
+                cueDurationTicks: 5_000,
+              },
+              { timestamp: 300, textBytes: trailing },
+            ],
+          }),
+        ],
+      }),
+      []
+    )
+  )
+
+  const packets = []
+
+  for await (const packet of reader.streamPgsTrack(
+    7,
+    new AbortController().signal
+  )) {
+    packets.push(packet)
+  }
+
+  assert.deepEqual(
+    packets.map(({ startTime, data, duration }) => [
+      startTime,
+      data[0],
+      duration,
+    ]),
+    [
+      [0.1, 0x14, null],
+      [0.1, 0x80, null],
+      [0.2, 0x14, 5],
+      [0.2, 0x80, 5],
+      [0.3, 0x16, null],
+      [0.3, 0x80, null],
+    ]
+  )
+})
+
+void test("starts at a distant first PGS Cue without scanning the A/V gap", async () => {
+  const leadingBlockCount = 520
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    clusterPaddingBytes: 8 * 1024,
+    cueBlockIndices: [leadingBlockCount],
+    tracks: [
+      makeTrack({
+        trackNumber: 2,
+        name: "Video placeholder",
+        language: "und",
+        codecId: "S_TEXT/UTF8",
+        blocks: Array.from({ length: leadingBlockCount }, (_, index) => ({
+          timestamp: index,
+          textBytes: Uint8Array.of(0),
+        })),
+      }),
+      makeTrack({
+        trackNumber: 7,
+        name: "PGS distant first Cue",
+        language: "eng",
+        codecId: "S_HDMV/PGS",
+        blocks: [
+          {
+            timestamp: leadingBlockCount,
+            textBytes: pgsDisplaySet([pgsPalette(0)]),
+          },
+        ],
+      }),
+    ],
+  })
+
+  const requests: RecordedRange[] = []
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-distant-first-cue.mkv",
+    rangedFetch(bytes, requests)
+  )
+
+  const packets = []
+
+  for await (const packet of reader.streamPgsTrack(
+    7,
+    new AbortController().signal
+  )) {
+    packets.push(packet)
+  }
+
+  assert.equal(packets[0]?.data[0], 0x14)
+
+  const clusterOffsets = findElementOffsets(bytes, IDS.cluster)
+  const [firstCluster] = clusterOffsets
+  const firstCueCluster = clusterOffsets.at(-1)
+
+  assert.notEqual(firstCluster, undefined)
+
+  assert.notEqual(firstCueCluster, undefined)
+
+  const leadingRequests = requests.filter((request) => {
+    const match = /^bytes=(\d+)-/.exec(request.header)
+
+    const start = match === null ? -1 : Number(match[1])
+
+    const firstCuePageStart =
+      Math.floor((firstCueCluster ?? 0) / 65_536) * 65_536
+
+    return start > (firstCluster ?? 0) && start < firstCuePageStart
+  })
+
+  assert.deepEqual(leadingRequests, [])
+})
+
+void test("stops before a dependent Cue after an unscanned physical gap", async () => {
+  const first = pgsDisplaySet([pgsPalette(0)])
+
+  const second = pgsDisplaySet([pgsPalette(1)])
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    clusterPaddingBytesByIndex: { 1: 64 * 1024 * 1024 + 1 },
+    cueBlockIndices: [0, 2],
+    tracks: [
+      makeTrack({
+        trackNumber: 7,
+        name: "PGS first Cue",
+        language: "eng",
+        codecId: "S_HDMV/PGS",
+        blocks: [{ timestamp: 100, textBytes: first }],
+      }),
+      makeTrack({
+        trackNumber: 2,
+        name: "Video placeholder",
+        language: "und",
+        codecId: "S_TEXT/UTF8",
+        blocks: [{ timestamp: 200, textBytes: Uint8Array.of(0) }],
+      }),
+      makeTrack({
+        trackNumber: 7,
+        name: "PGS second Cue",
+        language: "eng",
+        codecId: "S_HDMV/PGS",
+        blocks: [{ timestamp: 300, textBytes: second }],
+      }),
+    ],
+  })
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-unscanned-gap.mkv",
+    rangedFetch(bytes, [])
+  )
+
+  const packets: MatroskaPgsPacket[] = []
+
+  await assert.rejects(async () => {
+    for await (const packet of reader.streamPgsTrack(
+      7,
+      new AbortController().signal
+    )) {
+      packets.push(packet)
+    }
+  }, isLimitError)
+
+  assert.ok(packets.some((packet) => packet.startTime === 0.1))
+  assert.equal(
+    packets.some((packet) => packet.startTime === 0.3),
+    false
+  )
+})
+
+void test("reads a selected PGS block from an oversized A/V cluster", async () => {
+  const bytes = makeFixture({
+    paddingBytes: 5 * 1024 * 1024,
+    tracks: [
+      makeTrack({
+        trackNumber: 7,
+        name: "PGS oversized cluster",
+        language: "eng",
+        codecId: "S_HDMV/PGS",
+        textBytes: pgsDisplaySet([pgsPalette(0)]),
+      }),
+    ],
+  })
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-oversized-cluster.mkv",
+    rangedFetch(bytes, [])
+  )
+
+  const packets = []
+
+  for await (const packet of reader.streamPgsTrack(
+    7,
+    new AbortController().signal
+  )) {
+    packets.push(packet)
+  }
+
+  assert.equal(packets[0]?.data[0], 0x14)
+})
+
+void test("accepts a concatenated PGS block above the single-segment size", async () => {
+  const oversizedObject = new Uint8Array(65_538)
+  oversizedObject[0] = 0x15
+  oversizedObject[1] = 0xff
+  oversizedObject[2] = 0xff
+
+  const palette = pgsPalette(0)
+  const end = pgsSegment(0x80)
+  const blockBytes = concat(oversizedObject, palette, end)
+
+  assert.ok(blockBytes.byteLength + 4 > 65_550)
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-large-block.mkv",
+    rangedFetch(
+      makeFixture({
+        tracks: [
+          makeTrack({
+            trackNumber: 7,
+            name: "PGS large block",
+            language: "eng",
+            codecId: "S_HDMV/PGS",
+            textBytes: blockBytes,
+          }),
+        ],
+      }),
+      []
+    )
+  )
+
+  const packets = []
+
+  for await (const packet of reader.streamPgsTrack(
+    7,
+    new AbortController().signal
+  )) {
+    packets.push(packet)
+  }
+
+  assert.equal(packets[0]?.data.byteLength, oversizedObject.byteLength)
+  assert.equal(packets[1]?.data.byteLength, palette.byteLength)
+  assert.equal(packets[2]?.data.byteLength, end.byteLength)
 })

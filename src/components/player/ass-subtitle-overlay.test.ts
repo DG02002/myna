@@ -12,7 +12,10 @@ import {
   createStreamingAkariSubOptions,
   subscribeAssSubtitlePackets,
 } from "./ass-subtitle-overlay"
-import { startEmbeddedSubtitleLoad } from "./subtitle-tracks"
+import {
+  startEmbeddedSubtitleLoad,
+  SubtitleLoadManager,
+} from "./subtitle-tracks"
 
 type AssPacket = Parameters<
   Parameters<MatroskaAssTrackStream["subscribePackets"]>[0]
@@ -28,10 +31,6 @@ interface ControlledStream {
   fail: (failure: Error) => void
   listenerCount: () => number
   listeners: () => Array<(packets: AssPacket[]) => void>
-}
-
-interface EmbeddedLoadRef {
-  current: { id: string; controller: AbortController } | null
 }
 
 function createControlledStream(): ControlledStream {
@@ -124,13 +123,15 @@ function createLoadHarness(stream: MatroskaAssTrackStream) {
     cues: [],
   }
 
-  const loadRef: EmbeddedLoadRef = { current: null }
+  const loadManager = new SubtitleLoadManager()
 
   let streamStartCount = 0
 
   const reader: MatroskaSubtitleReader = {
     probe: async () => [],
     readCues: async () => [],
+    streamPgsTrack: async function* () {},
+    streamPgsWindow: async function* () {},
     streamAssTrack: () => {
       streamStartCount++
 
@@ -160,14 +161,16 @@ function createLoadHarness(stream: MatroskaAssTrackStream) {
   const pendingLoad = startEmbeddedSubtitleLoad({
     track,
     reader,
-    embeddedLoad: loadRef,
+    loadManager,
     setTracks,
     setAssTrackStream,
     setAssTrackStreamId,
+    setPgsSession: () => {},
+    setPgsTrackSessionId: () => {},
   })
 
   assert.ok(pendingLoad)
-  const controller = loadRef.current?.controller
+  const controller = loadManager.currentEmbeddedLoad()?.controller
   assert.ok(controller)
 
   return {
@@ -179,10 +182,12 @@ function createLoadHarness(stream: MatroskaAssTrackStream) {
       startEmbeddedSubtitleLoad({
         track: { ...track, status: tracks[0]?.status ?? track.status },
         reader,
-        embeddedLoad: loadRef,
+        loadManager,
         setTracks,
         setAssTrackStream,
         setAssTrackStreamId,
+        setPgsSession: () => {},
+        setPgsTrackSessionId: () => {},
       }),
     streamStartCount: () => streamStartCount,
     tracks: () => tracks,

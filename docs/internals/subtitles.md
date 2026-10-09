@@ -31,28 +31,97 @@ The reader retains its own bounded page cache.
 Proxy network failures and request timeouts get one retry within the same
 byte/request budget; cancellation and malformed range responses never retry.
 
-The text reader supports `S_TEXT/UTF8`. Tracks with content encodings, laced
-blocks, malformed UTF-8, or no usable cue duration fail as subtitles instead
-of producing corrupted cues. ASS/SSA use a separate selected-track path for
-`S_TEXT/ASS` and `S_TEXT/SSA`; Phase 8 UTF8 limits and cue rendering stay
-unchanged. The ASS reader passes Matroska `CodecPrivate` and timed packet bytes
-directly to AkariSub/libass in ordered batches as indexed cluster reads finish.
+The text reader supports `S_TEXT/UTF8`. UTF8, ASS/SSA, and PGS restore supported
+Block-scoped Matroska encodings in descending `ContentEncodingOrder`: zlib
+compression and header stripping. Each compressed and restored Block stays
+within the selected reader's existing Block limit, and zlib output is streamed
+with cancellation. Encryption, other scopes or algorithms, malformed encoding
+chains, laced Blocks, malformed UTF8, and missing cue duration fail as
+subtitles instead of producing corrupted cues. ASS/SSA use a separate
+selected-track path for `S_TEXT/ASS` and `S_TEXT/SSA`; cue decoding and
+rendering stay unchanged. The ASS reader passes Matroska `CodecPrivate` and
+timed packet bytes directly to AkariSub/libass in ordered batches as indexed
+cluster reads finish.
 Its bounded session retains packets so a renderer recreated during engine
 migration can replay them. It does not rebuild ASS `Dialogue` lines.
 
 ASS reads use 64 KiB range pages, a 48 MiB per-track byte budget, at most 1,024
-range requests, and a 240-second track deadline. UTF8 uses the same deadline
-with its separate 8 MiB byte budget. Cue packets are capped at 4
-MiB each and 50,000 per track; codec private data is capped at 256 KiB. The
-reader honors Cues and otherwise scans only the existing bounded cluster
-window. It reads fonts only when the selected `TrackEntry` links them with
+range requests, and a 240-second track deadline. UTF8 uses the same deadline,
+8 KiB range pages, a separate 16 MiB byte budget, and at most 2,048 requests.
+That bounded budget covers the measured remote SRT track's 1,574 distinct
+cluster pages without raising the ASS or PGS readers' limits. Cue packets are
+capped at 4 MiB each and 50,000 per track; codec private data is capped at
+256 KiB. The reader honors Cues and otherwise scans only the existing bounded
+cluster window. It reads fonts only when the selected `TrackEntry` links them with
 `AttachmentLink`; unlinked attachments are ignored. Linked font files are
 capped at 24 MiB each and 32 MiB total. Missing CodecPrivate, unsupported
-content encodings, laced blocks, malformed packet UTF8, missing cue duration,
-oversized resources, and malformed EBML fail the selected subtitle track.
+content-encoding types, scopes or algorithms, laced Blocks, malformed packet
+UTF8, missing cue duration, oversized resources, and malformed EBML fail the
+selected subtitle track.
 Invalid ASS syntax is delegated to libass; a renderer/worker error marks the
 track failed. Neither path changes playback state. The legacy `S_ASS` and
 `S_SSA` identifiers, unlinked fonts, bitmap subtitles, and OCR are unsupported.
+
+Embedded `S_HDMV/PGS` is a binary path. Matroska has no CodecPrivate for PGS;
+a Block can contain one or more concatenated PGS segments, and its Block
+timestamp and optional BlockDuration apply to each extracted segment. PGS
+segments are assembled through the End segment before they reach the parser.
+Palette, object, window, and composition state survives between display sets.
+A state-bearing packet that is missing or malformed invalidates dependent
+compositions until a complete EpochStart or AcquisitionPoint supplies every
+referenced palette, object, and window. Cue positions are byte hints rather
+than decoder restart points. Each seek loads from the nearest Cue, searches
+back at most 256 Cue entries or 120 seconds for a verified state boundary, and
+scans nearby physical gaps of at most 64 MiB to recover unindexed state. If no
+safe boundary is found, the canvas clears and the window is unavailable. The
+reader aims for at least 10 seconds of future composition coverage when Cue
+entries permit it, bounded to 120 seconds ahead; playback requests another
+window at the coverage edge. A 32 MiB LRU page cache is shared across windows
+to avoid fetching the same sparse-Cue gap repeatedly. A new seek cancels the
+current range reads and resets the worker before replaying the new window, so
+palette and object state cannot leak across a seek. One upcoming window may be
+prefetched and is discarded when a seek changes its target.
+
+PGS uses the low-level parser from libbitsub 1.12.1 in a dedicated worker. The
+adapter wraps each Matroska segment in the SUP segment header, converts its
+media timestamp to 90 kHz ticks relative to the first packet, and uses DTS 0:
+Matroska supplies a presentation timestamp only, and this parser stores but
+does not consume DTS. The parser uses a 32-bit PTS field and does not unwrap it,
+so tracks spanning more than 4,294,967,295 ticks (about 13 hours, 15 minutes)
+are stopped at the limit. Rendering uses the player clock directly, so native
+video and Mediabunny use the same parser path. `renderAtIndex` reconstructs
+earlier state from its nearest verified boundary; replay more than 10,000
+display sets from that boundary is reported unavailable and clears the canvas.
+Authored PGS palette entries remain in their limited-range BT.601 Y'CbCr form
+for state and partial updates. Expanded palettes sent to libbitsub pass through
+BT.601 RGB and are re-encoded as full-range Y'CbCr because the pinned decoder
+interprets palette values as full range; alpha is preserved. This conversion is
+only for decoder input and does not replace the raw palette state.
+
+The PGS reader caps each extracted segment at 65,550 bytes and each Matroska
+Block at 4 MiB, so one Block may carry a concatenated display set. One
+assembled display set is capped at 4 MiB, window bytes at 32 MiB, and a window
+at 50,000 segments. The Cue index is capped at 4 MiB and fetched in parallel
+64 KiB ranges, with at most 12 active reads. Target windows read through
+aligned 64 KiB pages with a 1 MiB LRU page cache, at most 1,024 requests and
+64 MiB of range traffic, and a 30-second deadline. The legacy full-track reader still scans only the first 4 MiB after
+the first Cluster when Cues are absent and has a 240-second operation deadline.
+Range requests have a 10-second deadline and proxy transient failures receive
+one retry inside the same budgets. The worker accepts at most one input Block
+at a time. Its replay data is capped at 32 MiB, display sets at 10,000,
+retained composition references at 20,000, objects at 64 per epoch, palettes
+at 8, windows at 32, and composition references at 32.
+Pending object bytes are capped at 2 MiB and each object at 4,194,304 pixels.
+A presentation is at most 4096 by 2160 pixels; referenced decoded objects
+together are capped at that pixel area and 35,389,440 RGBA bytes. The renderer
+keeps at most one transferred frame awaiting synchronous draw and clears
+libbitsub's decoded cache after each render. The session retains at most one
+prefetched window in addition to worker replay state. Browser/WASM allocator
+fragmentation and GPU-side canvas memory are not directly measurable by these
+byte limits. Track/source changes abort range reads and terminate the worker; a
+decoder failure stays nonfatal to media playback. The worker and WASM are
+loaded only when a PGS track is selected. The libbitsub license is served from
+`/licenses/libbitsub/`.
 
 AkariSub runs libass in a Web Worker on a player-owned canvas that reserves
 space for visible controls. Both engines drive its clock explicitly: native

@@ -16,8 +16,10 @@ import {
   type AudioTracksValue,
 } from "#/components/player/audio-tracks-context"
 import { MediabunnyVideo } from "#/components/player/mediabunny-video"
+import { PgsSubtitleOverlay } from "#/components/player/pgs-subtitle-overlay"
 import { SubtitleOverlay } from "#/components/player/subtitle-overlay"
 import { useSubtitles } from "#/components/player/subtitle-tracks"
+import { SubtitleTracksContext } from "#/components/player/subtitle-tracks-context"
 import { VideoSkin } from "#/components/videojs/video/skin"
 import type { MediabunnyMediaAdapter } from "#/media/engines/mediabunny-adapter"
 import type {
@@ -123,7 +125,9 @@ export function PlaybackStage({
     addSubtitle,
     restoreSelection: restoreSubtitleSelection,
     assTrackStream,
+    pgsSession,
     failSubtitle,
+    markSubtitleIncomplete,
     embeddedProbeFailed,
   } = useSubtitles({
     useAdvancedEngine: mode === "mediabunny",
@@ -258,7 +262,7 @@ export function PlaybackStage({
     [source, snapshot]
   )
 
-  const tracksValue = useMemo<AudioTracksValue>(() => {
+  const contextValues = useMemo(() => {
     let selectionLabel = ""
 
     if (mode === "native") {
@@ -268,99 +272,145 @@ export function PlaybackStage({
     }
 
     return {
-      tracks: audioTracks,
-      selectedId: effectiveSelectedId,
-      selectionLabel,
-      selectTrack,
+      audio: {
+        tracks: audioTracks,
+        selectedId: effectiveSelectedId,
+        selectionLabel,
+        selectTrack,
+      } satisfies AudioTracksValue,
+      subtitles: {
+        tracks: subtitleTracks,
+        selectedId: selectedSubtitleId,
+        selectSubtitle: restoreSubtitleSelection,
+      },
     }
-  }, [audioTracks, effectiveSelectedId, mode, selectTrack])
+  }, [
+    audioTracks,
+    effectiveSelectedId,
+    mode,
+    restoreSubtitleSelection,
+    selectTrack,
+    selectedSubtitleId,
+    subtitleTracks,
+  ])
 
   return (
-    <AudioTracksContext.Provider value={tracksValue}>
-      <>
-        {mode === "native" ? (
-          <VideoPlayer key="native">
-            <VideoSkin className="aspect-video w-full">
-              {hlsSource ? (
-                <LazyHlsVideo
-                  sourceUrl={source.url}
-                  videoRef={attachNativeVideo}
-                  onError={onNativeError}
-                />
-              ) : (
-                <Video
-                  ref={attachNativeVideo}
-                  playsInline
-                  preload="metadata"
-                  onError={onNativeError}
-                />
-              )}
-              {assTrackStream !== null &&
-              selectedSubtitleTrack?.source.kind === "matroska" &&
-              (selectedSubtitleTrack.source.codecId === "S_TEXT/ASS" ||
-                selectedSubtitleTrack.source.codecId === "S_TEXT/SSA") ? (
-                <AssSubtitleOverlay
-                  key={selectedSubtitleTrack.id}
-                  trackId={selectedSubtitleTrack.id}
-                  stream={assTrackStream}
-                  useAdvancedEngine={false}
-                  nativeVideo={nativeVideoElement}
-                  adapter={null}
-                  engine={null}
-                  onFailure={failSubtitle}
-                />
-              ) : null}
-            </VideoSkin>
-          </VideoPlayer>
-        ) : (
-          <VideoPlayer key="mediabunny">
-            <VideoSkin className="aspect-video w-full">
-              <MediabunnyVideo
-                init={engineInit}
-                onEngine={setEngine}
-                onSelectedAudioTrackId={setSelectedAudioTrackId}
-                onAdapter={(nextAdapter) => {
-                  if (nextAdapter !== null && snapshot !== null) {
-                    restoreSubtitleSelection(snapshot.subtitleTrackId)
-                  }
+    <AudioTracksContext.Provider value={contextValues.audio}>
+      <SubtitleTracksContext.Provider value={contextValues.subtitles}>
+        <>
+          {mode === "native" ? (
+            <VideoPlayer key="native">
+              <VideoSkin className="aspect-video w-full">
+                {hlsSource ? (
+                  <LazyHlsVideo
+                    sourceUrl={source.url}
+                    videoRef={attachNativeVideo}
+                    onError={onNativeError}
+                  />
+                ) : (
+                  <Video
+                    ref={attachNativeVideo}
+                    playsInline
+                    preload="metadata"
+                    onError={onNativeError}
+                  />
+                )}
+                {assTrackStream !== null &&
+                selectedSubtitleTrack?.source.kind === "matroska" &&
+                (selectedSubtitleTrack.source.codecId === "S_TEXT/ASS" ||
+                  selectedSubtitleTrack.source.codecId === "S_TEXT/SSA") ? (
+                  <AssSubtitleOverlay
+                    key={selectedSubtitleTrack.id}
+                    trackId={selectedSubtitleTrack.id}
+                    stream={assTrackStream}
+                    useAdvancedEngine={false}
+                    nativeVideo={nativeVideoElement}
+                    adapter={null}
+                    engine={null}
+                    onFailure={failSubtitle}
+                  />
+                ) : null}
+                {pgsSession !== null &&
+                selectedSubtitleTrack?.source.kind === "matroska" &&
+                selectedSubtitleTrack.source.codecId === "S_HDMV/PGS" ? (
+                  <PgsSubtitleOverlay
+                    key={selectedSubtitleTrack.id}
+                    session={pgsSession}
+                    trackId={selectedSubtitleTrack.id}
+                    useAdvancedEngine={false}
+                    nativeVideo={nativeVideoElement}
+                    adapter={null}
+                    onFailure={failSubtitle}
+                    onUnavailable={markSubtitleIncomplete}
+                  />
+                ) : null}
+              </VideoSkin>
+            </VideoPlayer>
+          ) : (
+            <VideoPlayer key="mediabunny">
+              <VideoSkin className="aspect-video w-full">
+                <MediabunnyVideo
+                  init={engineInit}
+                  onEngine={setEngine}
+                  onSelectedAudioTrackId={setSelectedAudioTrackId}
+                  onAdapter={(nextAdapter) => {
+                    if (nextAdapter !== null && snapshot !== null) {
+                      restoreSubtitleSelection(snapshot.subtitleTrackId)
+                    }
 
-                  setAdapter(nextAdapter)
-                }}
-              />
-              {adapter !== null && engine !== null ? (
-                <SubtitleOverlay
-                  adapter={adapter}
-                  engine={engine}
-                  track={subtitleTracks.find(
-                    (track) => track.id === selectedSubtitleId
-                  )}
+                    setAdapter(nextAdapter)
+                  }}
                 />
-              ) : null}
-              {assTrackStream !== null &&
-              selectedSubtitleTrack?.source.kind === "matroska" &&
-              (selectedSubtitleTrack.source.codecId === "S_TEXT/ASS" ||
-                selectedSubtitleTrack.source.codecId === "S_TEXT/SSA") ? (
-                <AssSubtitleOverlay
-                  key={selectedSubtitleTrack.id}
-                  trackId={selectedSubtitleTrack.id}
-                  stream={assTrackStream}
-                  useAdvancedEngine
-                  nativeVideo={null}
-                  adapter={adapter}
-                  engine={engine}
-                  onFailure={failSubtitle}
-                />
-              ) : null}
-            </VideoSkin>
-          </VideoPlayer>
-        )}
-        {renderDetails?.({
-          subtitleTracks,
-          addSubtitle,
-          canAddSubtitles: !hlsSource,
-          embeddedProbeFailed,
-        })}
-      </>
+                {adapter !== null && engine !== null ? (
+                  <SubtitleOverlay
+                    adapter={adapter}
+                    engine={engine}
+                    track={subtitleTracks.find(
+                      (track) => track.id === selectedSubtitleId
+                    )}
+                  />
+                ) : null}
+                {pgsSession !== null &&
+                adapter !== null &&
+                selectedSubtitleTrack?.source.kind === "matroska" &&
+                selectedSubtitleTrack.source.codecId === "S_HDMV/PGS" ? (
+                  <PgsSubtitleOverlay
+                    key={selectedSubtitleTrack.id}
+                    session={pgsSession}
+                    trackId={selectedSubtitleTrack.id}
+                    useAdvancedEngine
+                    nativeVideo={null}
+                    adapter={adapter}
+                    onFailure={failSubtitle}
+                    onUnavailable={markSubtitleIncomplete}
+                  />
+                ) : null}
+                {assTrackStream !== null &&
+                selectedSubtitleTrack?.source.kind === "matroska" &&
+                (selectedSubtitleTrack.source.codecId === "S_TEXT/ASS" ||
+                  selectedSubtitleTrack.source.codecId === "S_TEXT/SSA") ? (
+                  <AssSubtitleOverlay
+                    key={selectedSubtitleTrack.id}
+                    trackId={selectedSubtitleTrack.id}
+                    stream={assTrackStream}
+                    useAdvancedEngine
+                    nativeVideo={null}
+                    adapter={adapter}
+                    engine={engine}
+                    onFailure={failSubtitle}
+                  />
+                ) : null}
+              </VideoSkin>
+            </VideoPlayer>
+          )}
+          {renderDetails?.({
+            subtitleTracks,
+            addSubtitle,
+            canAddSubtitles: !hlsSource,
+            embeddedProbeFailed,
+          })}
+        </>
+      </SubtitleTracksContext.Provider>
     </AudioTracksContext.Provider>
   )
 }
