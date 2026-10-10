@@ -24,3 +24,9 @@ worker-configuration.d.ts
 .plans/
 .zcode/
 temp/
+
+# src/lib, scripts, and skill scripts are source code. A maintainer's global
+# gitignore excluding [Ll]ib and [Ss]cripts silently dropped them before.
+!src/lib/
+!scripts/
+!.agents/**/scripts/
