@@ -51,10 +51,10 @@ cluster across the file, so larger pages would multiply fetched bytes far past
 the budget; the 64 KiB page stays. The track deadline is a no-progress bound
 of 240 seconds that resets as indexed cluster batches complete, so a slow
 proxy path finishes while byte, request, and per-range deadlines bound the
-work absolutely. UTF8 uses a 240-second wall deadline,
-8 KiB range pages, a separate 16 MiB byte budget, and at most 2,048 requests.
-That bounded budget covers the measured remote SRT track's 1,574 distinct
-cluster pages without raising the ASS or PGS readers' limits. Cue packets are
+work absolutely. UTF8 uses 8 KiB range pages, a separate 32 MiB byte budget,
+and at most 4,096 requests. Its 240-second no-progress deadline extends as
+each page arrives, so a large sparse track can finish while byte, request, and
+per-range deadlines bound the work. Cue packets are
 capped at 4 MiB each and 50,000 per track; codec private data is capped at
 256 KiB. The reader honors Cues and otherwise scans only the existing bounded
 cluster window. It reads fonts only when the selected `TrackEntry` links them with
@@ -112,15 +112,16 @@ The PGS reader caps each extracted segment at 65,550 bytes and each Matroska
 Block at 4 MiB, so one Block may carry a concatenated display set. One
 assembled display set is capped at 4 MiB, window bytes at 32 MiB, and a window
 at 50,000 segments. The Cue index is capped at 4 MiB and fetched in parallel
-64 KiB ranges, with at most 12 active reads. Target windows read through
-aligned 2 MiB pages — latency-bound origins pay a full round-trip per range
-almost independently of its size, so a ~10 MB cluster is a handful of requests
-instead of hundreds — with at most 1,024 requests and 64 MiB of range
-traffic. Contiguous parses (cluster children, window gaps) know their byte
-span before parsing and prefetch its pages a few at a time ahead of the
-sequential cursor, and the forward extension prefetches to its coverage-goal
-Cue entry; pages past the event that satisfies coverage stay cached for the
-next window. The window deadline is a 30-second no-progress bound that
+64 KiB ranges, with at most 12 active reads. Target windows use aligned 2 MiB
+pages to keep latency-bound Cluster reads to a handful of requests. They allow
+at most 2,048 requests and 128 MiB of range traffic through 8 GiB; larger files
+have a 1 GiB range-traffic ceiling because the measured UHD clusters require a
+longer backward state search. Cue positions prefetch the Cluster header and
+selected PGS Block pages through the coverage-goal Cue. The sequential parser
+walks EBML child headers and fetches selected PGS Block payloads while skipping
+unrelated A/V payload pages; pages beyond the event that satisfies coverage
+stay cached for the next window. The window deadline is a 30-second no-progress
+bound that
 extends while pages keep arriving, so slow-but-delivering origins finish and
 only a stalled source aborts. The legacy full-track reader still scans only the first 4 MiB after
 the first Cluster when Cues are absent and has a 240-second operation deadline.

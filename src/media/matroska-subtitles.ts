@@ -433,18 +433,29 @@ function normalizePgsTrackFailure({
   return new MatroskaSubtitleError("unreachable", lastPacketTime)
 }
 
+function normalizeTextTrackFailure(
+  failure: MatroskaSubtitleError,
+  deadlineExpired: boolean
+): MatroskaSubtitleError {
+  if (deadlineExpired && failure.kind === "aborted") {
+    return new MatroskaSubtitleError("deadline")
+  }
+
+  return failure
+}
+
 const PAGE_SIZE = 8 * 1024
 
 const MAX_RANGE_BYTES = 8 * 1024 * 1024
 
 const MAX_RANGE_REQUESTS = 1024
 
-// A selected text track can point to many sparse 8 KiB cluster pages. The
-// remote SRT sample needed about 12.3 MiB across 1,574 pages, so keep a separate
-// bounded budget for that selected track instead of raising every reader.
-const MAX_TEXT_TRACK_RANGE_BYTES = 16 * 1024 * 1024
+// A selected text track can point to many sparse 8 KiB cluster pages. Keep a
+// separate bounded budget for that selected track instead of raising every
+// reader.
+const MAX_TEXT_TRACK_RANGE_BYTES = 32 * 1024 * 1024
 
-const MAX_TEXT_TRACK_RANGE_REQUESTS = 2048
+const MAX_TEXT_TRACK_RANGE_REQUESTS = 4096
 
 const MAX_CACHED_BYTES = 1024 * 1024
 
@@ -472,16 +483,19 @@ const MAX_CODEC_PRIVATE_BYTES = 256 * 1024
 const MAX_ASS_PACKET_BYTES = 4 * 1024 * 1024
 
 // Latency-bound origins pay a full round-trip per range request almost
-// independently of its size, so target-window pages are large enough that one
-// ~10 MB cluster is a handful of requests instead of hundreds. The boundary
-// search still walks cue-by-cue, so its page fetches stay sequential; 2 MiB
-// keeps a whole window load to roughly ten round-trips. Parsing stays
-// child-by-child; only the fetch geometry changed.
+// independently of its size. Two MiB pages keep a ~10 MiB Cluster to a handful
+// of requests while sparse cue reads avoid intervening clusters.
 const PGS_PAGE_SIZE = 2 * 1024 * 1024
 
-const MAX_PGS_RANGE_BYTES = 64 * 1024 * 1024
+const LARGE_FILE_PGS_PAGE_THRESHOLD = 8 * 1024 * 1024 * 1024
 
-const MAX_PGS_RANGE_REQUESTS = 1024
+// The 2 MiB trace exhausted 128 MiB before reaching a state boundary across
+// ~9 MiB clusters. Give REMUX files a larger fixed ceiling for boundary scans.
+const MAX_PGS_RANGE_BYTES = 128 * 1024 * 1024
+
+const LARGE_FILE_MAX_PGS_RANGE_BYTES = 1024 * 1024 * 1024
+
+const MAX_PGS_RANGE_REQUESTS = 2048
 
 const MAX_PGS_TRACK_BYTES = 32 * 1024 * 1024
 
@@ -1662,7 +1676,7 @@ class RangeReader {
     { promise: Promise<Uint8Array>; signal: AbortSignal }
   >()
   private readonly fetcher: typeof fetch
-  private readonly pageSize: number
+  readonly pageSize: number
   private readonly maxRangeBytes: number
   private readonly maxRangeRequests: number
 
@@ -1805,45 +1819,41 @@ class RangeReader {
   // reaches that page through the normal read path, which re-fetches it and
   // reports the failure through the caller's error handling.
   prefetch(start: number, end: number, signal: AbortSignal): void {
-    if (this.directReads || end <= start || signal.aborted) {
+    this.prefetchRanges([{ start, end }], signal)
+  }
+
+  prefetchRanges(
+    ranges: ReadonlyArray<{ start: number; end: number }>,
+    signal: AbortSignal
+  ): void {
+    if (this.directReads || ranges.length === 0 || signal.aborted) {
       return
     }
 
-    const firstPage = Math.floor(start / this.pageSize) * this.pageSize
-    const missing: number[] = []
+    const maximumPages = Math.min(
+      this.maxRangeRequests - this.requests,
+      Math.ceil((this.maxRangeBytes - this.bytesRead) / this.pageSize)
+    )
 
-    for (
-      let pageStart = firstPage;
-      pageStart < end;
-      pageStart += this.pageSize
-    ) {
-      if (this.fileSize !== null && pageStart >= this.fileSize) {
-        break
-      }
-
-      if (
-        this.pageCache.get(pageStart) !== undefined ||
-        this.pendingPages.has(pageStart)
-      ) {
-        continue
-      }
-
-      missing.push(pageStart)
+    if (maximumPages <= 0) {
+      return
     }
 
-    if (missing.length === 0) {
+    const pageStarts = this.collectMissingPrefetchPages(ranges, maximumPages)
+
+    if (pageStarts.length === 0) {
       return
     }
 
     let nextPage = 0
 
     const fetchPages = async (): Promise<void> => {
-      while (nextPage < missing.length) {
+      while (nextPage < pageStarts.length) {
         if (signal.aborted) {
           return
         }
 
-        const pageStart = missing[nextPage]
+        const pageStart = pageStarts[nextPage]
         nextPage += 1
 
         try {
@@ -1856,10 +1866,54 @@ class RangeReader {
 
     void Promise.all(
       Array.from(
-        { length: Math.min(PAGE_PREFETCH_CONCURRENCY, missing.length) },
+        { length: Math.min(PAGE_PREFETCH_CONCURRENCY, pageStarts.length) },
         fetchPages
       )
     )
+  }
+
+  private collectMissingPrefetchPages(
+    ranges: ReadonlyArray<{ start: number; end: number }>,
+    maximumPages: number
+  ): number[] {
+    const missing = new Set<number>()
+
+    for (const range of ranges) {
+      if (range.end <= range.start) {
+        continue
+      }
+
+      const firstPage = Math.floor(range.start / this.pageSize) * this.pageSize
+
+      for (
+        let pageStart = firstPage;
+        pageStart < range.end;
+        pageStart += this.pageSize
+      ) {
+        if (this.fileSize !== null && pageStart >= this.fileSize) {
+          break
+        }
+
+        if (
+          this.pageCache.get(pageStart) !== undefined ||
+          this.pendingPages.has(pageStart)
+        ) {
+          continue
+        }
+
+        missing.add(pageStart)
+
+        if (missing.size >= maximumPages) {
+          break
+        }
+      }
+
+      if (missing.size >= maximumPages) {
+        break
+      }
+    }
+
+    return [...missing]
   }
 
   private validateReadRange(start: number, length: number): void {
@@ -2473,15 +2527,21 @@ export function createMatroskaSubtitleReader(
   const createPgsRangeReader = (
     fileSize: number | null = null,
     directReads = false
-  ) =>
-    new RangeReader(mediaUrl, fetcher, {
+  ) => {
+    const largeFile =
+      fileSize !== null && fileSize > LARGE_FILE_PGS_PAGE_THRESHOLD
+
+    return new RangeReader(mediaUrl, fetcher, {
       pageSize: PGS_PAGE_SIZE,
-      maxRangeBytes: MAX_PGS_RANGE_BYTES,
+      maxRangeBytes: largeFile
+        ? LARGE_FILE_MAX_PGS_RANGE_BYTES
+        : MAX_PGS_RANGE_BYTES,
       maxRangeRequests: MAX_PGS_RANGE_REQUESTS,
       fileSize,
       directReads,
       pageCache: pgsPageCache,
     })
+  }
 
   return new MatroskaSubtitleReaderImpl(
     new RangeReader(mediaUrl, fetcher, {
@@ -2560,6 +2620,8 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     signal: AbortSignal
   ): Promise<SubtitleCue[]> {
     const deadline = withDeadline(signal)
+    const extendDeadline = deadline.extend
+    this.reader.onProgress = extendDeadline
 
     try {
       const metadata = await this.readMetadata(deadline.signal)
@@ -2584,20 +2646,45 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
         throw new MatroskaSubtitleError("invalid")
       }
 
-      blocks.sort((left, right) => left.startTime - right.startTime)
+      return this.createTextCues(blocks, metadata)
+    } catch (failure) {
+      if (signal.aborted) {
+        throw new MatroskaSubtitleError("aborted")
+      }
 
-      return blocks.map((block) => ({
-        startTime: block.startTime,
-        endTime: this.endTime(
-          block.startTime,
-          block.durationTicks,
-          metadata.timestampScale
-        ),
-        text: block.text,
-      }))
+      if (failure instanceof MatroskaSubtitleError) {
+        throw normalizeTextTrackFailure(failure, deadline.expired())
+      }
+
+      throw failure
     } finally {
+      this.clearProgressCallback(extendDeadline)
       deadline.dispose()
     }
+  }
+
+  private clearProgressCallback(callback: () => void): void {
+    // An older read must not clear a newer track's deadline callback.
+    if (this.reader.onProgress === callback) {
+      this.reader.onProgress = null
+    }
+  }
+
+  private createTextCues(
+    blocks: DecodedBlock[],
+    metadata: ParsedFile
+  ): SubtitleCue[] {
+    blocks.sort((left, right) => left.startTime - right.startTime)
+
+    return blocks.map((block) => ({
+      startTime: block.startTime,
+      endTime: this.endTime(
+        block.startTime,
+        block.durationTicks,
+        metadata.timestampScale
+      ),
+      text: block.text,
+    }))
   }
 
   streamPgsTrack(
@@ -2960,10 +3047,9 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     return { ...seed, packets, inspection, forwardCueIndex }
   }
 
-  // The forward extension's byte destination is known from the Cue entries
-  // before it starts, so its pages can pipeline while earlier stages are still
-  // running. Pages past the event that satisfies coverage stay in the shared
-  // page cache and serve the next playback window instead of being wasted.
+  // Cue entries identify the cluster header and selected Block pages. Prefetch
+  // those sparse pages while earlier stages run instead of downloading every
+  // intervening video and audio payload page.
   private prefetchPgsWindowForwardSpan({
     metadata,
     seed,
@@ -2979,8 +3065,8 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
   }): void {
     const startEntry = seed.cueEntries[seed.targetCueIndex + 1]
 
-    const goalEntry =
-      seed.cueEntries[findPgsCueIndexAtTime(seed.cueEntries, coverageGoal) + 1]
+    const goalIndex = findPgsCueIndexAtTime(seed.cueEntries, coverageGoal) + 1
+    const goalEntry = seed.cueEntries[goalIndex]
 
     if (
       startEntry === undefined ||
@@ -2991,17 +3077,33 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
       return
     }
 
-    // Block offsets are relative to cluster data, a few dozen bytes past the
-    // cluster header; one page of margin absorbs both that and the goal
-    // block's tail.
-    this.reader.prefetch(
-      metadata.segmentDataStart + startEntry.position.clusterPosition,
-      metadata.segmentDataStart +
-        goalEntry.position.clusterPosition +
-        (goalEntry.position.relativePosition ?? 0) +
-        PGS_PAGE_SIZE,
-      signal
-    )
+    const ranges: Array<{ start: number; end: number }> = []
+
+    for (let index = seed.targetCueIndex + 1; index <= goalIndex; index += 1) {
+      const entry = seed.cueEntries[index]
+
+      if (entry === undefined) {
+        continue
+      }
+
+      const clusterStart =
+        metadata.segmentDataStart + entry.position.clusterPosition
+
+      ranges.push({ start: clusterStart, end: clusterStart + 1 })
+
+      if (entry.position.relativePosition !== null) {
+        const blockStart = clusterStart + entry.position.relativePosition
+
+        // RelativePosition starts at Cluster data, after its small header.
+        // This page-sized range also covers a Block that straddles a page edge.
+        ranges.push({
+          start: blockStart,
+          end: blockStart + this.reader.pageSize,
+        })
+      }
+    }
+
+    this.reader.prefetchRanges(ranges, signal)
   }
 
   private async includeNextPgsCue({
@@ -4274,6 +4376,8 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
       signal,
     }
 
+    this.reader.prefetch(child.dataStart, child.end, signal)
+
     return {
       packets: await this.readPgsClusterChild(child, context),
       cluster,
@@ -4461,9 +4565,6 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     if (endOffset === startOffset) {
       return []
     }
-
-    // The gap span is known before parsing; pipeline its pages in.
-    this.reader.prefetch(startOffset, endOffset, signal)
 
     const clusterTicks = await this.readClusterTimestamp(cluster, signal)
 
@@ -5059,9 +5160,6 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
 
     const clusterEnd = context.cluster.end ?? context.cluster.dataStart
 
-    // Parsing walks every child of the cluster; pipeline its pages in.
-    this.reader.prefetch(context.cluster.dataStart, clusterEnd, context.signal)
-
     for await (const child of childElements(this.reader, {
       start: context.cluster.dataStart,
       end: clusterEnd,
@@ -5113,6 +5211,10 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
       context.trackNumber
     ) {
       return []
+    }
+
+    if (child.end !== null) {
+      this.reader.prefetch(child.dataStart, child.end, context.signal)
     }
 
     const parsed = await this.readBlockPayload(
@@ -5171,6 +5273,10 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
 
         if (parsed !== null) {
           throw new MatroskaSubtitleError("unsupported")
+        }
+
+        if (child.end !== null) {
+          this.reader.prefetch(child.dataStart, child.end, signal)
         }
 
         parsed = await this.readBlockPayload(child, signal, MAX_PGS_BLOCK_BYTES)

@@ -2917,6 +2917,77 @@ void test("loads a zlib PGS window from a verified boundary without earlier A/V"
   )
 })
 
+void test("prefetches sparse PGS cue pages across large clusters", async () => {
+  const epoch = pgsDisplaySet([
+    pgsPalette(0),
+    pgsObject(1, 0),
+    pgsWindow(0),
+    pgsPresentation(0x80, 0, [{ objectId: 1, windowId: 0 }]),
+  ])
+
+  const composition = pgsDisplaySet([
+    pgsPresentation(0, 0, [{ objectId: 1, windowId: 0 }]),
+  ])
+
+  const blocks = Array.from({ length: 12 }, (_, index) => ({
+    timestamp: index * 1_000,
+    textBytes: index === 0 ? epoch : composition,
+  }))
+
+  const clusterPaddingBytes = 6.5 * 1024 * 1024
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    clusterPaddingBytes,
+    tracks: [
+      makeTrack({
+        trackNumber: 7,
+        name: "Large cluster PGS window",
+        language: "eng",
+        codecId: "S_HDMV/PGS",
+        blocks,
+      }),
+    ],
+  })
+
+  const requests: RecordedRange[] = []
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-sparse-window.mkv",
+    rangedFetch(bytes, requests)
+  )
+
+  const events = []
+
+  for await (const event of reader.streamPgsWindow(
+    7,
+    0,
+    new AbortController().signal
+  )) {
+    events.push(event)
+  }
+
+  assert.equal(events[0]?.kind, "boundary")
+  assert.equal(events.at(-1)?.kind, "coverage")
+
+  const rangeBytes = requests.reduce(
+    (total, request) => total + request.bytes,
+    0
+  )
+
+  const paddingBytes = clusterPaddingBytes * blocks.length
+
+  assert.ok(
+    rangeBytes < paddingBytes,
+    `Expected PGS range traffic to skip unrelated padded cluster bytes; received ${rangeBytes}.`
+  )
+
+  assert.ok(
+    requests.length < blocks.length * 4,
+    "Expected fewer range requests than fetching every padded cluster page."
+  )
+})
+
 void test("covers multiple PGS compositions in one bounded window", async () => {
   const epoch = pgsDisplaySet([
     pgsPalette(0),
