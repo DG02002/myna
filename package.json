@@ -15,7 +15,7 @@
     "cf-typegen": "wrangler types",
     "test": "vitest run && tsx --test src/media/engines/mediabunny-engine.test.ts src/media/subtitles.test.ts src/media/matroska-subtitles.test.ts src/media/pgs-subtitles.test.ts src/media/pgs-subtitle-session.test.ts src/media/pgs-subtitle-worker.test.ts src/components/player/ass-subtitle-overlay.test.ts",
     "check": "pnpm run fmt:check && pnpm run lint && pnpm run lint:markdown && pnpm run typecheck && pnpm run knip && pnpm run knip:production",
-    "lint": "oxlint src scripts vite.config.ts vitest.config.ts",
+    "lint": "pnpm run cf-typegen && oxlint src scripts vite.config.ts vitest.config.ts",
     "lint:markdown": "markdownlint-cli2",
     "typecheck": "pnpm run cf-typegen && tsc --noEmit",
     "fmt": "oxfmt src scripts vite.config.ts vitest.config.ts package.json knip.json lint-staged.config.mjs .oxlintrc.json .oxfmtrc.json",
