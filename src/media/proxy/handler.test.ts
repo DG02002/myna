@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { mediaProxy } from "./handler"
 
-const PROXY_ORIGIN = "https://playloom.test"
+const PROXY_ORIGIN = "https://myna.test"
 
 const UPSTREAM_ORIGIN = "https://upstream.test"
 

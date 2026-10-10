@@ -4,7 +4,7 @@
 
 Please report suspected security vulnerabilities through [GitHub private
 vulnerability
-reporting](https://github.com/DG02002/playloom/security/advisories/new).
+reporting](https://github.com/DG02002/myna/security/advisories/new).
 
 Do not open a public issue or discussion with exploit details.
 

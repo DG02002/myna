@@ -12,6 +12,6 @@ export const SubtitleTracksContext = createContext<SubtitleTracksValue | null>(
   null
 )
 
-export function usePlayloomSubtitleTracks(): SubtitleTracksValue | null {
+export function useMynaSubtitleTracks(): SubtitleTracksValue | null {
   return useContext(SubtitleTracksContext)
 }

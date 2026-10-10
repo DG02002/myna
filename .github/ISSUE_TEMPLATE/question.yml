@@ -1,0 +1,38 @@
+name: Question
+description: Ask a focused question about using or contributing to Myna.
+title: "[Question]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [README](https://github.com/DG02002/myna/blob/main/README.md)
+        and the [contributing guide](https://github.com/DG02002/myna/blob/main/CONTRIBUTING.md)
+        first. Never include credentials, cookies, private media URLs, or
+        personal data.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do, and where are you stuck?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: context
+    attributes:
+      label: Context
+      options:
+        - Using Myna
+        - Contributing to the repository
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Include the relevant media shape, browser, command, version, or error text. Redact sensitive information.

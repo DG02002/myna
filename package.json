@@ -1,6 +1,7 @@
 {
-  "name": "playloom",
+  "name": "myna",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "imports": {
     "#/*": "./src/*"

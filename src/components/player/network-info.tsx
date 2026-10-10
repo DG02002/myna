@@ -2,14 +2,14 @@ import { useEffect, useState } from "react"
 
 import type { PlaybackEngineMode } from "#/components/player/playback-stage"
 
-interface PlayloomNetworkConnection extends EventTarget {
+interface MynaNetworkConnection extends EventTarget {
   readonly downlink: number
   readonly rtt: number
 }
 
 declare global {
   interface Navigator {
-    readonly connection?: PlayloomNetworkConnection
+    readonly connection?: MynaNetworkConnection
   }
 }
 
@@ -233,7 +233,7 @@ function resetStaleTimer(
 }
 
 function readConnectionValue(
-  connection: PlayloomNetworkConnection | null,
+  connection: MynaNetworkConnection | null,
   property: "downlink" | "rtt"
 ): number | null {
   if (connection === null) {

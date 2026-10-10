@@ -18,6 +18,6 @@ export interface AudioTracksValue {
 
 export const AudioTracksContext = createContext<AudioTracksValue | null>(null)
 
-export function usePlayloomAudioTracks(): AudioTracksValue | null {
+export function useMynaAudioTracks(): AudioTracksValue | null {
   return useContext(AudioTracksContext)
 }

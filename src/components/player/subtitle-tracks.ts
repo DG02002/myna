@@ -1160,7 +1160,7 @@ function syncSelectedTrack(
 
   // Browsers may dispatch TextTrackList changes between disabling the old
   // track and showing the new one. Preserve the app's selected track through
-  // that transient empty state; the Playloom captions menu owns the Off action.
+  // that transient empty state; the Myna captions menu owns the Off action.
   if (nextSelectedId === null && selectedId !== null) {
     applyTextTrackSelection(registry, selectedId)
 

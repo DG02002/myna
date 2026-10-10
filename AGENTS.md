@@ -1,6 +1,6 @@
-# Playloom
+# Myna
 
-Playloom is a browser media player. Paste a direct media URL and it plays
+Myna is a browser media player. Paste a direct media URL and it plays
 immediately. The browser's native pipeline always plays first; custom decoding
 exists only to extend what the browser cannot do — E-AC-3/AC-3/DTS audio, track
 switching, and CORS-blocked byte access. Decoding happens in the client, never
@@ -23,7 +23,7 @@ afraid to change existing code. Don't take shortcuts by just adding local logic
 to solve a problem. Prefer implementing functionality in existing files unless
 it is a new logical component, and avoid creating many small files.
 
-## A note from Playloom
+## A note from Myna
 
 I like ambitious ideas, simple systems, and software that feels obvious. Do not
 preserve complexity just because it already exists. Do not introduce machinery
@@ -41,8 +41,8 @@ loudly and get a human sign-off before breaking it.
 
 ## A small glossary
 
-- **you** means the agent reading this file and changing Playloom.
-- **user** means a person pasting a media URL into Playloom.
+- **you** means the agent reading this file and changing Myna.
+- **user** means a person pasting a media URL into Myna.
 - **native path** means the browser's own `<video>` pipeline, including
   platform HLS.
 - **advanced engine** means the Mediabunny/WebCodecs/WASM pipeline used only

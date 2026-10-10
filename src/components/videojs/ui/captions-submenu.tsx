@@ -10,7 +10,7 @@ import { Text as TextPrimitive } from "@videojs/react"
 import { CaptionsOffIcon as CaptionsOffIconPrimitive } from "@videojs/react/icons"
 import { CaptionsRadioGroup } from "@videojs/react/ui/captions-radio-group"
 
-import { usePlayloomSubtitleTracks } from "#/components/player/subtitle-tracks-context"
+import { useMynaSubtitleTracks } from "#/components/player/subtitle-tracks-context"
 import { MenuChevron } from "#/components/videojs/ui/menu-chevron.tsx"
 import { RadioItem } from "#/components/videojs/ui/radio-item.tsx"
 import { cn } from "#/lib/utils.ts"
@@ -18,7 +18,7 @@ import { cn } from "#/lib/utils.ts"
 export type CaptionsSubmenuProps = Omit<Menu.RootProps, "children">
 
 export function CaptionsSubmenu({ ...props }: CaptionsSubmenuProps = {}) {
-  const subtitles = usePlayloomSubtitleTracks()
+  const subtitles = useMynaSubtitleTracks()
 
   if (subtitles === null || subtitles.tracks.length === 0) {
     return <NativeCaptionsSubmenu {...props} />

@@ -54,7 +54,7 @@ export function parseDirectSource(raw: string): SourceParseResult {
   return { source: { kind: "direct", url: url.toString() } }
 }
 
-const SOURCE_SESSION_KEY = "playloom.source"
+const SOURCE_SESSION_KEY = "myna.source"
 
 export function storeSourceForSession(source: PlaybackSource): void {
   window.sessionStorage.setItem(SOURCE_SESSION_KEY, source.url)

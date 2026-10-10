@@ -24,7 +24,7 @@ const INVALID_URL_MESSAGES: Record<InvalidUrlReason, PlaybackFailureMessage> = {
   },
   "unsupported-scheme": {
     title: "Only web links can play",
-    description: "Playloom plays http:// and https:// links to media files.",
+    description: "Myna plays http:// and https:// links to media files.",
   },
 }
 
@@ -44,7 +44,7 @@ const FAILURE_MESSAGES: Record<
   network: {
     title: "Couldn't reach the server",
     description:
-      "Playloom couldn't fetch the file. Open the link in a new tab to check it still works, then try again.",
+      "Myna couldn't fetch the file. Open the link in a new tab to check it still works, then try again.",
   },
   decode: {
     title: "This file can't be decoded",

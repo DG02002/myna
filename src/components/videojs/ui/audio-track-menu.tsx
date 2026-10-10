@@ -9,18 +9,18 @@ import { Menu } from "@videojs/react"
 import { Text as TextPrimitive } from "@videojs/react"
 import { SpeechIcon as SpeechIconPrimitive } from "@videojs/react/icons"
 
-import { usePlayloomAudioTracks } from "#/components/player/audio-tracks-context"
+import { useMynaAudioTracks } from "#/components/player/audio-tracks-context"
 import { MenuChevron } from "#/components/videojs/ui/menu-chevron.tsx"
 import { RadioItem } from "#/components/videojs/ui/radio-item.tsx"
 import { cn } from "#/lib/utils.ts"
 
 export type AudioTrackMenuProps = Omit<Menu.RootProps, "children">
 
-// Playloom drives this menu from its own probe/engine track list: the
+// Myna drives this menu from its own probe/engine track list: the
 // browser exposes no native audioTracks on this class of file, so the
 // store-backed radio group would always be empty.
 export function AudioTrackMenu({ ...props }: AudioTrackMenuProps = {}) {
-  const audioTracks = usePlayloomAudioTracks()
+  const audioTracks = useMynaAudioTracks()
 
   if (audioTracks === null || audioTracks.tracks.length === 0) {
     return null

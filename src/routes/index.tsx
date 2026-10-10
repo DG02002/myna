@@ -39,7 +39,7 @@ function HomePage() {
       <section className="w-full max-w-xl space-y-6">
         <div className="space-y-2 text-center">
           <h1 className="text-3xl font-semibold tracking-tight max-sm:text-2xl">
-            Playloom
+            Myna
           </h1>
           <p className="text-muted-foreground text-balance">
             Paste a direct media link and play it right here.

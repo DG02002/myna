@@ -7,7 +7,7 @@ checkout, development commands, and quality gates.
 
 ## Read This First
 
-Playloom is a small focused product. We accept focused fixes and maintenance
+Myna is a small focused product. We accept focused fixes and maintenance
 work, but large feature requests and direction changes need discussion first.
 
 You can report a bug or open a PR, but please keep it focused, tested, and
@@ -25,7 +25,7 @@ playback paths.
 
 Small performance improvements.
 
-Tightly scoped maintenance work that clearly improves Playloom without
+Tightly scoped maintenance work that clearly improves Myna without
 changing its direction.
 
 ## What We Are Least Likely To Accept
