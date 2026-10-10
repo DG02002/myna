@@ -471,7 +471,13 @@ const MAX_CODEC_PRIVATE_BYTES = 256 * 1024
 
 const MAX_ASS_PACKET_BYTES = 4 * 1024 * 1024
 
-const PGS_PAGE_SIZE = 64 * 1024
+// Latency-bound origins pay a full round-trip per range request almost
+// independently of its size, so target-window pages are large enough that one
+// ~10 MB cluster is a handful of requests instead of hundreds. The boundary
+// search still walks cue-by-cue, so its page fetches stay sequential; 2 MiB
+// keeps a whole window load to roughly ten round-trips. Parsing stays
+// child-by-child; only the fetch geometry changed.
+const PGS_PAGE_SIZE = 2 * 1024 * 1024
 
 const MAX_PGS_RANGE_BYTES = 64 * 1024 * 1024
 
@@ -503,6 +509,10 @@ const MIN_PGS_WINDOW_COVERAGE_SECONDS = 10
 
 const MAX_PGS_WINDOW_FORWARD_SECONDS = 120
 
+// No-progress bound for one target window: the timer extends while window
+// pages keep arriving, so slow-but-delivering origins finish and only a
+// stalled source aborts. Total work stays capped by the byte and request
+// budgets.
 const MAX_PGS_WINDOW_DEADLINE_MS = 30_000
 
 const MAX_PGS_WINDOW_GAP_BYTES = 64 * 1024 * 1024
@@ -520,6 +530,13 @@ const INDEXED_CLUSTER_READ_CONCURRENCY = 12
 
 const INDEXED_CLUSTER_READ_WINDOW = INDEXED_CLUSTER_READ_CONCURRENCY * 2
 
+// Contiguous parse walks (cluster children, window gaps) know their full byte
+// span before parsing. Fetch that span's pages a few at a time ahead of the
+// sequential cursor so latency-bound origins overlap round-trips instead of
+// paying one per page. Every prefetched page is inside the span the parser is
+// about to walk, so this is pipelining, not speculation.
+const PAGE_PREFETCH_CONCURRENCY = 4
+
 const MAX_ASS_FONT_BYTES = 32 * 1024 * 1024
 
 const MAX_ASS_FONT_FILE_BYTES = 24 * 1024 * 1024
@@ -532,6 +549,9 @@ const ASS_PAGE_SIZE = 64 * 1024
 
 const MAX_ASS_RANGE_REQUESTS = 1024
 
+// No-progress bound for a selected ASS track: the timer resets as indexed
+// cluster reads complete, so slow-but-healthy proxy paths finish while total
+// work stays capped by the byte and request budgets.
 const ASS_TRACK_DEADLINE_MS = 240_000
 
 const MAX_CLUSTER_SCAN_BYTES = 4 * 1024 * 1024
@@ -1182,6 +1202,7 @@ interface ScannedCluster {
 interface DeadlineScope {
   signal: AbortSignal
   expired: () => boolean
+  extend: () => void
   dispose: () => void
 }
 
@@ -1198,6 +1219,7 @@ interface AssTrackPacketReadOptions {
   trackNumber: number
   signal: AbortSignal
   stream: MutableMatroskaAssTrackStream
+  extendDeadline: () => void
 }
 
 function createMatroskaAssTrackStream(): MutableMatroskaAssTrackStream {
@@ -1646,6 +1668,10 @@ class RangeReader {
 
   private readonly directReads: boolean
 
+  // Notified after every completed page fetch. Deadline owners use it to
+  // extend a no-progress deadline while a slow source keeps delivering.
+  onProgress: (() => void) | null = null
+
   constructor(
     private readonly url: string,
     fetcher: typeof fetch,
@@ -1772,6 +1798,70 @@ class RangeReader {
     }
   }
 
+  // Fetch the aligned pages covering [start, end) ahead of a sequential parse
+  // of the same span, with bounded concurrency. Cached and in-flight pages are
+  // skipped, budgets apply per fetched page, and the parent signal cancels
+  // outstanding fetches. A prefetch failure is not surfaced here: the parser
+  // reaches that page through the normal read path, which re-fetches it and
+  // reports the failure through the caller's error handling.
+  prefetch(start: number, end: number, signal: AbortSignal): void {
+    if (this.directReads || end <= start || signal.aborted) {
+      return
+    }
+
+    const firstPage = Math.floor(start / this.pageSize) * this.pageSize
+    const missing: number[] = []
+
+    for (
+      let pageStart = firstPage;
+      pageStart < end;
+      pageStart += this.pageSize
+    ) {
+      if (this.fileSize !== null && pageStart >= this.fileSize) {
+        break
+      }
+
+      if (
+        this.pageCache.get(pageStart) !== undefined ||
+        this.pendingPages.has(pageStart)
+      ) {
+        continue
+      }
+
+      missing.push(pageStart)
+    }
+
+    if (missing.length === 0) {
+      return
+    }
+
+    let nextPage = 0
+
+    const fetchPages = async (): Promise<void> => {
+      while (nextPage < missing.length) {
+        if (signal.aborted) {
+          return
+        }
+
+        const pageStart = missing[nextPage]
+        nextPage += 1
+
+        try {
+          await this.readPage(pageStart, signal)
+        } catch {
+          return
+        }
+      }
+    }
+
+    void Promise.all(
+      Array.from(
+        { length: Math.min(PAGE_PREFETCH_CONCURRENCY, missing.length) },
+        fetchPages
+      )
+    )
+  }
+
   private validateReadRange(start: number, length: number): void {
     if (
       !Number.isSafeInteger(start) ||
@@ -1872,7 +1962,11 @@ class RangeReader {
 
     this.reservePage(start, end)
 
-    return this.readFromRangeSource(start, end, signal)
+    const page = await this.readFromRangeSource(start, end, signal)
+
+    this.onProgress?.()
+
+    return page
   }
 
   private pageEnd(start: number): number {
@@ -2316,11 +2410,19 @@ function withDeadline(
   const abortFromParent = () => controller.abort()
 
   let expired = false
+  let deadline: ReturnType<typeof setTimeout> | undefined
 
-  const deadline = setTimeout(() => {
+  const fire = () => {
     expired = true
     controller.abort()
-  }, timeoutMs)
+  }
+
+  const arm = () => {
+    clearTimeout(deadline)
+    deadline = setTimeout(fire, timeoutMs)
+  }
+
+  arm()
 
   if (parentSignal.aborted) {
     controller.abort()
@@ -2331,6 +2433,14 @@ function withDeadline(
   return {
     signal: controller.signal,
     expired: () => expired,
+    // Extend is for track deadlines measured in progress, not wall time: a
+    // load whose reads keep completing stays inside its byte and request
+    // budgets and must not die to this clock.
+    extend: () => {
+      if (!expired) {
+        arm()
+      }
+    },
     dispose: () => {
       clearTimeout(deadline)
       parentSignal.removeEventListener("abort", abortFromParent)
@@ -2531,8 +2641,17 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
 
       const metadata = await this.readMetadata(deadline.signal)
 
+      const windowRangeReader = this.rangeReaders.createPgsRangeReader(
+        this.reader.size
+      )
+
+      // The window deadline bounds a lack of progress, not wall time: a
+      // latency-bound origin can legitimately need more than one deadline
+      // window of round-trips while pages keep arriving.
+      windowRangeReader.onProgress = deadline.extend
+
       const windowReader = new MatroskaSubtitleReaderImpl(
-        this.rangeReaders.createPgsRangeReader(this.reader.size),
+        windowRangeReader,
         this.rangeReaders,
         { metadata, pgsCueIndexes: this.pgsCueIndexes }
       )
@@ -2804,6 +2923,14 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     let forwardCueIndex = seed.targetCueIndex
     const coverageGoal = targetTime + MIN_PGS_WINDOW_COVERAGE_SECONDS
 
+    this.prefetchPgsWindowForwardSpan({
+      metadata,
+      seed,
+      targetTime,
+      coverageGoal,
+      signal,
+    })
+
     while (
       (inspection.nextEventTime === null ||
         inspection.nextEventTime < coverageGoal) &&
@@ -2831,6 +2958,50 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     }
 
     return { ...seed, packets, inspection, forwardCueIndex }
+  }
+
+  // The forward extension's byte destination is known from the Cue entries
+  // before it starts, so its pages can pipeline while earlier stages are still
+  // running. Pages past the event that satisfies coverage stay in the shared
+  // page cache and serve the next playback window instead of being wasted.
+  private prefetchPgsWindowForwardSpan({
+    metadata,
+    seed,
+    targetTime,
+    coverageGoal,
+    signal,
+  }: {
+    metadata: ParsedFile
+    seed: PgsWindowSeed
+    targetTime: number
+    coverageGoal: number
+    signal: AbortSignal
+  }): void {
+    const startEntry = seed.cueEntries[seed.targetCueIndex + 1]
+
+    const goalEntry =
+      seed.cueEntries[findPgsCueIndexAtTime(seed.cueEntries, coverageGoal) + 1]
+
+    if (
+      startEntry === undefined ||
+      goalEntry === undefined ||
+      // The extension stops at the forward bound; do not fetch past it.
+      goalEntry.time - targetTime > MAX_PGS_WINDOW_FORWARD_SECONDS
+    ) {
+      return
+    }
+
+    // Block offsets are relative to cluster data, a few dozen bytes past the
+    // cluster header; one page of margin absorbs both that and the goal
+    // block's tail.
+    this.reader.prefetch(
+      metadata.segmentDataStart + startEntry.position.clusterPosition,
+      metadata.segmentDataStart +
+        goalEntry.position.clusterPosition +
+        (goalEntry.position.relativePosition ?? 0) +
+        PGS_PAGE_SIZE,
+      signal
+    )
   }
 
   private async includeNextPgsCue({
@@ -2962,11 +3133,16 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
         stream
       )
 
+      deadline.extend()
+
       const packets = await this.readAssTrackPackets({
         metadata: input.metadata,
         trackNumber,
         signal: deadline.signal,
         stream,
+        // The deadline is a no-progress bound: through a slow proxy the whole
+        // track can outrun the wall clock while every read keeps succeeding.
+        extendDeadline: deadline.extend,
       })
 
       return {
@@ -3050,6 +3226,7 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     trackNumber,
     signal,
     stream,
+    extendDeadline,
   }: AssTrackPacketReadOptions): Promise<MatroskaAssPacket[]> {
     const packets: MatroskaAssPacket[] = []
     let packetBytes = 0
@@ -3074,6 +3251,7 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
         throw new MatroskaSubtitleError("limit")
       }
 
+      extendDeadline()
       stream.appendPackets(batch)
     }
 
@@ -4284,6 +4462,9 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
       return []
     }
 
+    // The gap span is known before parsing; pipeline its pages in.
+    this.reader.prefetch(startOffset, endOffset, signal)
+
     const clusterTicks = await this.readClusterTimestamp(cluster, signal)
 
     const context: PgsClusterContext = {
@@ -4876,9 +5057,14 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
   ): Promise<MatroskaPgsPacket[]> {
     const packets: MatroskaPgsPacket[] = []
 
+    const clusterEnd = context.cluster.end ?? context.cluster.dataStart
+
+    // Parsing walks every child of the cluster; pipeline its pages in.
+    this.reader.prefetch(context.cluster.dataStart, clusterEnd, context.signal)
+
     for await (const child of childElements(this.reader, {
       start: context.cluster.dataStart,
-      end: context.cluster.end ?? context.cluster.dataStart,
+      end: clusterEnd,
       signal: context.signal,
     })) {
       const childPackets = await this.readPgsClusterChild(child, context)

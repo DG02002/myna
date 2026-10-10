@@ -1864,6 +1864,134 @@ void test("ASS deadline reports timeout after retaining partial packets", async 
   assert.equal(replayed.includes("Cue 12"), false)
 })
 
+void test("keeps a progressing ASS load alive by re-arming the track deadline", async (context) => {
+  const originalSetTimeout = globalThis.setTimeout
+  const originalClearTimeout = globalThis.clearTimeout
+
+  type DeadlineTimerHandle = ReturnType<typeof setTimeout>
+
+  const deadlineTimerHandles = new Set<DeadlineTimerHandle>()
+  let clearedDeadlineTimers = 0
+
+  context.mock.method(
+    globalThis,
+    "setTimeout",
+    (callback: (...args: never[]) => void, delay?: number) => {
+      if (delay === 240_000) {
+        // The real timer never fires within the test; only its handle is
+        // tracked so re-arms are observable through clearTimeout.
+        const handle = originalSetTimeout(() => undefined, delay)
+
+        deadlineTimerHandles.add(handle)
+
+        return handle
+      }
+
+      return originalSetTimeout(callback, delay)
+    }
+  )
+
+  context.mock.method(
+    globalThis,
+    "clearTimeout",
+    (handle: DeadlineTimerHandle) => {
+      if (deadlineTimerHandles.delete(handle)) {
+        clearedDeadlineTimers += 1
+      }
+
+      originalClearTimeout(handle)
+    }
+  )
+
+  const encoder = new TextEncoder()
+
+  const packets = Array.from({ length: 6 }, (_, index) => ({
+    timestamp: (index + 1) * 1_000,
+    textBytes: encoder.encode(
+      `0,0:00:00.0${index},0:00:01.00,Default,,0,0,0,,Cue ${index}`
+    ),
+    cueDurationTicks: 1_000,
+  }))
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    clusterPaddingBytes: 64 * 1024,
+    tracks: [
+      makeTrack({
+        trackNumber: 2,
+        name: "ASS extended deadline",
+        language: "eng",
+        codecId: "S_TEXT/ASS",
+        codecPrivate: encoder.encode("[Script Info]\r\n[Events]\r\n"),
+        blocks: packets,
+      }),
+    ],
+  })
+
+  const lastClusterOffset = findElementOffsets(bytes, IDS.cluster).at(-1) ?? 0
+
+  const delayedPage = Math.floor(lastClusterOffset / (64 * 1024)) * (64 * 1024)
+
+  const fixtureFetch = rangedFetch(bytes, [])
+
+  let releaseFinalCluster!: () => void
+
+  const finalClusterReleased = new Promise<void>((resolve) => {
+    releaseFinalCluster = resolve
+  })
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const range = new Headers(init?.headers).get("Range") ?? ""
+    const start = Number(/^bytes=(\d+)-\d+$/.exec(range)?.[1])
+
+    if (start === delayedPage) {
+      await finalClusterReleased
+    }
+
+    return fixtureFetch(input, init)
+  }
+
+  const stream = createMatroskaSubtitleReader(
+    "https://media.example/ass-extended-deadline.mkv",
+    fetcher
+  ).streamAssTrack(2, new AbortController().signal)
+
+  let resolveFirstBatches!: () => void
+
+  const firstBatches = new Promise<void>((resolve) => {
+    resolveFirstBatches = resolve
+  })
+
+  const received: string[] = []
+
+  void stream.result.catch(() => {})
+
+  stream.subscribePackets((batch) => {
+    received.push(...batch.map(({ data }) => new TextDecoder().decode(data)))
+
+    if (received.length >= 5) {
+      resolveFirstBatches()
+    }
+  })
+
+  await firstBatches
+
+  releaseFinalCluster()
+
+  const result = await stream.result
+
+  assert.equal(result.packets.length, 6)
+  assert.equal(received.length, 6)
+
+  // The gated final cluster cannot share a batch with the five before it, so
+  // at least two progress re-arms plus the dispose must have cleared timers;
+  // a fixed deadline clears exactly one, in dispose.
+  assert.ok(
+    clearedDeadlineTimers >= 3,
+    `Expected batch progress to re-arm the track deadline, saw ${clearedDeadlineTimers} clears.`
+  )
+})
+
 void test("accepts ASS tracks above 10,000 packets within the shared cue limit", async () => {
   const encoder = new TextEncoder()
 
@@ -3187,12 +3315,170 @@ void test("starts at a distant first PGS Cue without scanning the A/V gap", asyn
     const start = match === null ? -1 : Number(match[1])
 
     const firstCuePageStart =
-      Math.floor((firstCueCluster ?? 0) / 65_536) * 65_536
+      Math.floor((firstCueCluster ?? 0) / (2 * 1024 * 1024)) * (2 * 1024 * 1024)
 
     return start > (firstCluster ?? 0) && start < firstCuePageStart
   })
 
   assert.deepEqual(leadingRequests, [])
+})
+
+void test("reads indexed PGS clusters through large aligned range pages", async () => {
+  const pageSize = 2 * 1024 * 1024
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    clusterPaddingBytes: pageSize * 2 + 1024,
+    tracks: [
+      makeTrack({
+        trackNumber: 7,
+        name: "PGS large pages",
+        language: "eng",
+        codecId: "S_HDMV/PGS",
+        blocks: [0, 1, 2].map((index) => ({
+          timestamp: (index + 1) * 1_000,
+          textBytes: pgsDisplaySet([pgsPalette(index)]),
+        })),
+      }),
+    ],
+  })
+
+  const requests: RecordedRange[] = []
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-large-pages.mkv",
+    rangedFetch(bytes, requests)
+  )
+
+  const packets: MatroskaPgsPacket[] = []
+
+  for await (const packet of reader.streamPgsTrack(
+    7,
+    new AbortController().signal
+  )) {
+    packets.push(packet)
+  }
+
+  // Each display set contributes one packet per PGS segment (palette + end).
+  assert.equal(packets.length, 6)
+
+  const clusterPageStarts = new Set(
+    findElementOffsets(bytes, IDS.cluster).map(
+      (offset) => Math.floor(offset / pageSize) * pageSize
+    )
+  )
+
+  const clusterPages = requests.filter(({ header }) => {
+    const match = /^bytes=(\d+)-/.exec(header)
+
+    return match !== null && clusterPageStarts.has(Number(match[1]))
+  })
+
+  // Three padded clusters spanning about two pages each must arrive in a
+  // handful of aligned requests, not hundreds of small ones.
+  assert.ok(
+    clusterPages.length > 0 && clusterPages.length <= 9,
+    `Expected aligned cluster page reads, got ${JSON.stringify(clusterPages)}.`
+  )
+  assert.ok(
+    clusterPages.every(({ header, bytes: byteLength }) => {
+      const match = /^bytes=(\d+)-(\d+)$/.exec(header)
+
+      return (
+        match !== null &&
+        Number(match[1]) % pageSize === 0 &&
+        byteLength <= pageSize
+      )
+    }),
+    `Expected 2 MiB-aligned page requests, got ${JSON.stringify(clusterPages)}.`
+  )
+})
+
+void test("pipelines cluster page fetches ahead of sequential PGS parsing", async () => {
+  const pageSize = 2 * 1024 * 1024
+
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    clusterPaddingBytes: pageSize * 2 + 1024,
+    tracks: [
+      makeTrack({
+        trackNumber: 7,
+        name: "PGS pipelined pages",
+        language: "eng",
+        codecId: "S_HDMV/PGS",
+        blocks: [
+          { timestamp: 1_000, textBytes: pgsDisplaySet([pgsPalette(0)]) },
+        ],
+      }),
+    ],
+  })
+
+  const [clusterOffset] = findElementOffsets(bytes, IDS.cluster)
+
+  if (clusterOffset === undefined) {
+    throw new Error("The pipelined PGS fixture needs a cluster.")
+  }
+
+  const clusterPage = Math.floor(clusterOffset / pageSize) * pageSize
+
+  // The padded cluster spans three pages, but its parse only reads headers
+  // near the cluster start: the middle and last pages arrive exclusively
+  // through the cluster-span prefetch. Hold the middle page and require the
+  // last page to be fetched anyway — that is the pipelining under test.
+  const heldPage = clusterPage + pageSize
+  const prefetchedPage = heldPage + pageSize
+
+  const fixtureFetch = rangedFetch(bytes, [])
+
+  let releaseHeldPage!: () => void
+  let resolvePrefetchStarted!: () => void
+
+  const heldPageReleased = new Promise<void>((resolve) => {
+    releaseHeldPage = resolve
+  })
+
+  const clusterPrefetchStarted = new Promise<void>((resolve) => {
+    resolvePrefetchStarted = resolve
+  })
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/pgs-pipelined-pages.mkv",
+    async (input, init) => {
+      const range = new Headers(init?.headers).get("range") ?? ""
+      const match = /^bytes=(\d+)-\d+$/.exec(range)
+      const start = match === null ? -1 : Number(match[1])
+
+      if (start === prefetchedPage) {
+        resolvePrefetchStarted()
+      }
+
+      if (start === heldPage || start === prefetchedPage) {
+        await heldPageReleased
+      }
+
+      return fixtureFetch(input, init)
+    }
+  )
+
+  const packets: MatroskaPgsPacket[] = []
+
+  const reading = (async () => {
+    for await (const packet of reader.streamPgsTrack(
+      7,
+      new AbortController().signal
+    )) {
+      packets.push(packet)
+    }
+  })()
+
+  await clusterPrefetchStarted
+
+  releaseHeldPage()
+
+  await reading
+
+  // One packet per PGS segment: palette and end of display set.
+  assert.equal(packets.length, 2)
 })
 
 void test("stops before a dependent Cue after an unscanned physical gap", async () => {

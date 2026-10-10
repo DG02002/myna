@@ -45,8 +45,13 @@ cluster reads finish.
 Its bounded session retains packets so a renderer recreated during engine
 migration can replay them. It does not rebuild ASS `Dialogue` lines.
 
-ASS reads use 64 KiB range pages, a 48 MiB per-track byte budget, at most 1,024
-range requests, and a 240-second track deadline. UTF8 uses the same deadline,
+ASS reads use 64 KiB range pages, a 48 MiB per-track byte budget, and at
+most 1,024 range requests. ASS subtitle blocks are scattered one-to-a-few per
+cluster across the file, so larger pages would multiply fetched bytes far past
+the budget; the 64 KiB page stays. The track deadline is a no-progress bound
+of 240 seconds that resets as indexed cluster batches complete, so a slow
+proxy path finishes while byte, request, and per-range deadlines bound the
+work absolutely. UTF8 uses a 240-second wall deadline,
 8 KiB range pages, a separate 16 MiB byte budget, and at most 2,048 requests.
 That bounded budget covers the measured remote SRT track's 1,574 distinct
 cluster pages without raising the ASS or PGS readers' limits. Cue packets are
@@ -75,8 +80,13 @@ back at most 256 Cue entries or 120 seconds for a verified state boundary, and
 scans nearby physical gaps of at most 64 MiB to recover unindexed state. If no
 safe boundary is found, the canvas clears and the window is unavailable. The
 reader aims for at least 10 seconds of future composition coverage when Cue
-entries permit it, bounded to 120 seconds ahead; playback requests another
-window at the coverage edge. A 32 MiB LRU page cache is shared across windows
+entries permit it, bounded to 120 seconds ahead; the session starts loading
+the next window as soon as playback is 30 seconds from the coverage edge,
+because a window load on a latency-bound origin can take most of the window
+deadline. While playback sits between the active window's coverage and the
+next window landing, the renderer reports a transient clear rather than an
+unavailable: only a window load that genuinely fails marks the track partial.
+A 32 MiB LRU page cache is shared across windows
 to avoid fetching the same sparse-Cue gap repeatedly. A new seek cancels the
 current range reads and resets the worker before replaying the new window, so
 palette and object state cannot leak across a seek. One upcoming window may be
@@ -103,8 +113,16 @@ Block at 4 MiB, so one Block may carry a concatenated display set. One
 assembled display set is capped at 4 MiB, window bytes at 32 MiB, and a window
 at 50,000 segments. The Cue index is capped at 4 MiB and fetched in parallel
 64 KiB ranges, with at most 12 active reads. Target windows read through
-aligned 64 KiB pages with a 1 MiB LRU page cache, at most 1,024 requests and
-64 MiB of range traffic, and a 30-second deadline. The legacy full-track reader still scans only the first 4 MiB after
+aligned 2 MiB pages — latency-bound origins pay a full round-trip per range
+almost independently of its size, so a ~10 MB cluster is a handful of requests
+instead of hundreds — with at most 1,024 requests and 64 MiB of range
+traffic. Contiguous parses (cluster children, window gaps) know their byte
+span before parsing and prefetch its pages a few at a time ahead of the
+sequential cursor, and the forward extension prefetches to its coverage-goal
+Cue entry; pages past the event that satisfies coverage stay cached for the
+next window. The window deadline is a 30-second no-progress bound that
+extends while pages keep arriving, so slow-but-delivering origins finish and
+only a stalled source aborts. The legacy full-track reader still scans only the first 4 MiB after
 the first Cluster when Cues are absent and has a 240-second operation deadline.
 Range requests have a 10-second deadline and proxy transient failures receive
 one retry inside the same budgets. The worker accepts at most one input Block

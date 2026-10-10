@@ -92,7 +92,10 @@ const MAX_PGS_WINDOW_PACKETS = 50_000
 
 const MAX_PGS_WINDOW_BYTES = 32 * 1024 * 1024
 
-const PGS_WINDOW_PREFETCH_LEAD_SECONDS = 5
+// A window load on a latency-bound origin can take most of the window
+// deadline, so the next window must start loading as soon as playback is
+// inside the current one instead of near its coverage edge.
+const PGS_WINDOW_PREFETCH_LEAD_SECONDS = 30
 
 const MAX_PGS_WINDOW_FORWARD_SECONDS = 120
 
@@ -435,8 +438,18 @@ export class PgsSubtitleSession {
           }
         : { kind: message.type }
 
+    // In window mode the worker reports "unavailable" whenever the render
+    // time is past the active window's coverage — including the moments
+    // before the first window lands and while the next one is loading on a
+    // slow origin. That state is transient by construction: requestTime
+    // keeps starting window loads for such times, and a load that genuinely
+    // fails reports its own unavailable. Report a clear so the canvas
+    // empties without marking the track incomplete.
+    const transientCoverageGap =
+      message.type === "unavailable" && this.isBeyondWindowCoverage()
+
     if (!stale && message.type !== "hold") {
-      this.notifyListeners(frame)
+      this.notifyListeners(transientCoverageGap ? { kind: "clear" } : frame)
     }
 
     if (message.type === "frame") {
@@ -531,6 +544,21 @@ export class PgsSubtitleSession {
       this.activeWindowTarget !== null &&
       time >= this.activeWindowTarget &&
       time <= this.activeWindowTarget + MAX_PGS_WINDOW_FORWARD_SECONDS
+    )
+  }
+
+  private isBeyondWindowCoverage(): boolean {
+    if (this.windowLoader === null || this.failedValue) {
+      return false
+    }
+
+    const time = this.latestTime
+
+    // Before the first window activates there is no coverage yet; the first
+    // load is in flight and reports its own failure if it cannot land.
+    return (
+      time !== null &&
+      (this.currentWindow === null || time > this.currentWindow.end)
     )
   }
 
