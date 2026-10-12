@@ -22,13 +22,22 @@ import { SubtitlePlaybackStatus } from "#/components/player/subtitle-controls"
 import { SubtitleOverlay } from "#/components/player/subtitle-overlay"
 import { useSubtitles } from "#/components/player/subtitle-tracks"
 import { SubtitleTracksContext } from "#/components/player/subtitle-tracks-context"
+import { Button } from "#/components/ui/button"
 import { VideoSkin } from "#/components/videojs/video/skin"
 import type { MediabunnyMediaAdapter } from "#/media/engines/mediabunny-adapter"
-import type {
-  EngineInit,
+import {
   MediabunnyEngine,
+  type EngineInit,
 } from "#/media/engines/mediabunny-engine"
+import { ConfirmedPosition } from "#/media/models/confirmed-position"
 import { MEDIA_ERR_SRC_NOT_SUPPORTED } from "#/media/models/media-errors"
+import {
+  canPersistPlaybackPosition,
+  createResumeConfirmation,
+  RESUME_CONFIRMATION_DEADLINE_MS,
+  RESUME_POSITION_TOLERANCE_SECONDS,
+  type ResumeStatus,
+} from "#/media/models/playback-resume"
 import {
   isHlsUrl,
   isMatroskaUrl,
@@ -88,6 +97,132 @@ export interface PlaybackPositionChange {
   reason: "progress" | "seek" | "pause" | "ended"
 }
 
+export interface PlaybackStageDependencies {
+  createEngine: (init: EngineInit) => MediabunnyEngine
+  probeSource: typeof probeSource
+}
+
+function createMediabunnyEngine(init: EngineInit): MediabunnyEngine {
+  return new MediabunnyEngine(init)
+}
+
+type RecoveryStatus = "idle" | "pending" | "failed"
+
+interface RecoveryOperation {
+  mode: PlaybackEngineMode
+  engine: MediabunnyEngine | null
+  element: HTMLVideoElement | null
+  deadline: ReturnType<typeof setTimeout> | null
+}
+
+function recoveryMessage(status: RecoveryStatus): string {
+  if (status === "pending") {
+    return "Starting from beginning…"
+  }
+
+  if (status === "failed") {
+    return "Could not start from beginning."
+  }
+
+  return "Could not restore the saved position."
+}
+
+function recoveryActionLabel(status: RecoveryStatus): string {
+  if (status === "pending") {
+    return "Starting…"
+  }
+
+  if (status === "failed") {
+    return "Try again"
+  }
+
+  return "Start from beginning"
+}
+
+interface NativePositionEventHandlers {
+  restorePosition: () => void
+  onTimeUpdate: () => void
+  onSeeking: () => void
+  onSeeked: () => void
+  onPause: () => void
+  onEnded: () => void
+}
+
+function listenToNativePositionEvents(
+  element: HTMLVideoElement,
+  handlers: NativePositionEventHandlers
+): () => void {
+  element.addEventListener("loadedmetadata", handlers.restorePosition)
+  element.addEventListener("timeupdate", handlers.onTimeUpdate)
+  element.addEventListener("seeking", handlers.onSeeking)
+  element.addEventListener("seeked", handlers.onSeeked)
+  element.addEventListener("pause", handlers.onPause)
+  element.addEventListener("ended", handlers.onEnded)
+
+  return () => {
+    element.removeEventListener("loadedmetadata", handlers.restorePosition)
+    element.removeEventListener("timeupdate", handlers.onTimeUpdate)
+    element.removeEventListener("seeking", handlers.onSeeking)
+    element.removeEventListener("seeked", handlers.onSeeked)
+    element.removeEventListener("pause", handlers.onPause)
+    element.removeEventListener("ended", handlers.onEnded)
+  }
+}
+
+function migrationStartTime({
+  status,
+  initialTime,
+  element,
+  confirmedPosition,
+}: {
+  status: ResumeStatus
+  initialTime: number
+  element: HTMLVideoElement | null
+  confirmedPosition: ConfirmedPosition
+}): number {
+  if (status === "pending" || status === "failed") {
+    return initialTime
+  }
+
+  if (
+    element !== null &&
+    element.readyState >= HTMLMediaElement.HAVE_METADATA
+  ) {
+    return confirmedPosition.capture(element.currentTime, element.seeking)
+  }
+
+  return initialTime
+}
+
+function ResumeRecoveryNotice({
+  visible,
+  status,
+  onStartFromBeginning,
+}: {
+  visible: boolean
+  status: RecoveryStatus
+  onStartFromBeginning: () => void
+}) {
+  if (!visible) {
+    return null
+  }
+
+  return (
+    <div
+      role="alert"
+      aria-busy={status === "pending"}
+      className="absolute inset-0 z-50 grid place-items-center bg-black/70 p-4"
+    >
+      <div className="max-w-sm rounded-xl bg-background p-5 text-center text-foreground shadow-xl">
+        <p className="mb-3 text-sm">{recoveryMessage(status)}</p>
+        <Button disabled={status === "pending"} onClick={onStartFromBeginning}>
+          {recoveryActionLabel(status)}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function usePlaybackPositionTracking({
   mode,
   nativeMediaRef,
@@ -106,6 +241,139 @@ function usePlaybackPositionTracking({
   const [initialStartTimeSeconds, setInitialStartTimeSeconds] =
     useState(startTimeSeconds)
 
+  const [resumeStatus, setResumeStatus] = useState<ResumeStatus>(() =>
+    startTimeSeconds > 0 ? "pending" : "idle"
+  )
+
+  const resumeStatusRef = useRef(resumeStatus)
+  const nativePositionRef = useRef<ConfirmedPosition | null>(null)
+  const [recoveryStatus, setRecoveryStatus] = useState<RecoveryStatus>("idle")
+  const recoveryOperationRef = useRef<RecoveryOperation | null>(null)
+
+  const [engineStartTimeSeconds, setEngineStartTimeSeconds] =
+    useState(startTimeSeconds)
+
+  const getNativePosition = useCallback(() => {
+    const currentPosition = nativePositionRef.current
+
+    if (currentPosition !== null) {
+      return currentPosition
+    }
+
+    const initialPosition = new ConfirmedPosition(startTimeSeconds)
+    nativePositionRef.current = initialPosition
+
+    return initialPosition
+  }, [startTimeSeconds])
+
+  const updateResumeStatus = useCallback((status: ResumeStatus) => {
+    resumeStatusRef.current = status
+    setResumeStatus(status)
+  }, [])
+
+  const ownsRecovery = useCallback((operation: RecoveryOperation) => {
+    return recoveryOperationRef.current === operation
+  }, [])
+
+  const failRecovery = useCallback(
+    (operation: RecoveryOperation) => {
+      if (!ownsRecovery(operation)) {
+        return
+      }
+
+      if (operation.deadline !== null) {
+        clearTimeout(operation.deadline)
+        operation.deadline = null
+      }
+
+      if (operation.mode === "native") {
+        getNativePosition().cancelSeek()
+      }
+
+      recoveryOperationRef.current = null
+      setRecoveryStatus("failed")
+    },
+    [getNativePosition, ownsRecovery]
+  )
+
+  const completeRecovery = useCallback(
+    (operation: RecoveryOperation, resultingTime: number) => {
+      if (!ownsRecovery(operation)) {
+        return
+      }
+
+      const actualTime =
+        operation.mode === "native"
+          ? operation.element?.currentTime
+          : operation.engine?.currentTime
+
+      if (
+        actualTime === undefined ||
+        !Number.isFinite(actualTime) ||
+        Math.abs(actualTime) > RESUME_POSITION_TOLERANCE_SECONDS ||
+        !Number.isFinite(resultingTime) ||
+        Math.abs(resultingTime) > RESUME_POSITION_TOLERANCE_SECONDS
+      ) {
+        failRecovery(operation)
+
+        return
+      }
+
+      if (
+        operation.mode === "native" &&
+        (operation.element === null ||
+          !getNativePosition().completeSeek(
+            actualTime,
+            operation.element.seeking
+          ))
+      ) {
+        failRecovery(operation)
+
+        return
+      }
+
+      if (operation.deadline !== null) {
+        clearTimeout(operation.deadline)
+        operation.deadline = null
+      }
+
+      recoveryOperationRef.current = null
+      setRecoveryStatus("idle")
+      updateResumeStatus("declined")
+      setInitialStartTimeSeconds(0)
+      setEngineStartTimeSeconds(0)
+      onPositionChange({ currentTime: actualTime, reason: "seek" })
+    },
+    [
+      failRecovery,
+      getNativePosition,
+      onPositionChange,
+      ownsRecovery,
+      setEngineStartTimeSeconds,
+      updateResumeStatus,
+    ]
+  )
+
+  const cancelRecovery = useCallback(() => {
+    const operation = recoveryOperationRef.current
+
+    if (operation === null) {
+      return
+    }
+
+    if (operation.deadline !== null) {
+      clearTimeout(operation.deadline)
+      operation.deadline = null
+    }
+
+    if (operation.mode === "native") {
+      getNativePosition().cancelSeek()
+    }
+
+    recoveryOperationRef.current = null
+    setRecoveryStatus("idle")
+  }, [getNativePosition])
+
   useEffect(() => {
     if (mode !== "native" || nativeVideoElement === null) {
       return undefined
@@ -117,77 +385,159 @@ function usePlaybackPositionTracking({
       return undefined
     }
 
-    let restored = initialStartTimeSeconds <= 0
+    const nativePosition = getNativePosition()
+
+    const resume = createResumeConfirmation({
+      targetTime: initialStartTimeSeconds,
+      getStatus: () => resumeStatusRef.current,
+      updateStatus: updateResumeStatus,
+      onAccepted(currentTime, confirmed) {
+        if (confirmed) {
+          setInitialStartTimeSeconds(0)
+        }
+
+        onPositionChange({ currentTime, reason: "seek" })
+      },
+    })
+
+    let resumeSeekStarted = false
 
     const restorePosition = () => {
-      if (restored) {
+      if (resumeStatusRef.current !== "pending" || resumeSeekStarted) {
         return
       }
 
-      restored = true
-
       if (
-        Number.isFinite(element.duration) &&
-        element.duration > 0 &&
-        initialStartTimeSeconds < element.duration - 1
+        !Number.isFinite(element.duration) ||
+        element.duration <= 0 ||
+        initialStartTimeSeconds >= element.duration - 1
       ) {
-        element.currentTime = initialStartTimeSeconds
+        resume.fail()
+
+        return
       }
 
-      // Keep the saved position available until metadata arrives, so a
-      // migration that happens during loading can still start at that point.
-      setInitialStartTimeSeconds(0)
-    }
+      resumeSeekStarted = true
+      nativePosition.beginSeek(initialStartTimeSeconds)
 
-    if (element.readyState >= HTMLMediaElement.HAVE_METADATA) {
-      restorePosition()
-    } else {
-      element.addEventListener("loadedmetadata", restorePosition, {
-        once: true,
-      })
+      try {
+        element.currentTime = initialStartTimeSeconds
+      } catch {
+        resume.fail()
+
+        return
+      }
+
+      resume.startDeadline()
     }
 
     const onTimeUpdate = () => {
-      if (restored) {
+      const currentTime = nativePosition.observePosition(
+        element.currentTime,
+        element.seeking
+      )
+
+      if (
+        currentTime !== null &&
+        canPersistPlaybackPosition(resumeStatusRef.current)
+      ) {
         onPositionChange({
-          currentTime: element.currentTime,
+          currentTime,
           reason: "progress",
         })
       }
     }
 
+    const onSeeking = () => {
+      const recovery = recoveryOperationRef.current
+
+      if (
+        recovery?.mode === "native" &&
+        recovery.element === element &&
+        Math.abs(element.currentTime) > RESUME_POSITION_TOLERANCE_SECONDS
+      ) {
+        cancelRecovery()
+        nativePosition.beginSeek(element.currentTime)
+
+        return
+      }
+
+      nativePosition.beginSeek(element.currentTime)
+    }
+
     const onSeeked = () => {
-      if (restored) {
-        onPositionChange({ currentTime: element.currentTime, reason: "seek" })
+      const recovery = recoveryOperationRef.current
+
+      if (recovery?.mode === "native" && recovery.element === element) {
+        const actualTime = element.currentTime
+
+        if (
+          Math.abs(actualTime) > RESUME_POSITION_TOLERANCE_SECONDS ||
+          !nativePosition.completeSeek(actualTime, element.seeking)
+        ) {
+          failRecovery(recovery)
+
+          return
+        }
+
+        completeRecovery(recovery, actualTime)
+
+        return
+      }
+
+      if (nativePosition.completeSeek(element.currentTime, element.seeking)) {
+        resume.confirm(element.currentTime)
       }
     }
 
     const onPause = () => {
-      if (restored) {
-        onPositionChange({ currentTime: element.currentTime, reason: "pause" })
+      if (canPersistPlaybackPosition(resumeStatusRef.current)) {
+        onPositionChange({
+          currentTime: nativePosition.capture(
+            element.currentTime,
+            element.seeking
+          ),
+          reason: "pause",
+        })
       }
     }
 
     const onEnded = () => {
-      if (restored) {
-        onPositionChange({ currentTime: element.currentTime, reason: "ended" })
+      nativePosition.confirmEnded(element.currentTime)
+
+      if (canPersistPlaybackPosition(resumeStatusRef.current)) {
+        onPositionChange({
+          currentTime: nativePosition.confirmedTime,
+          reason: "ended",
+        })
       }
     }
 
-    element.addEventListener("timeupdate", onTimeUpdate)
-    element.addEventListener("seeked", onSeeked)
-    element.addEventListener("pause", onPause)
-    element.addEventListener("ended", onEnded)
+    const removePositionListeners = listenToNativePositionEvents(element, {
+      restorePosition,
+      onTimeUpdate,
+      onSeeking,
+      onSeeked,
+      onPause,
+      onEnded,
+    })
+
+    if (element.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      restorePosition()
+    }
 
     return () => {
-      element.removeEventListener("loadedmetadata", restorePosition)
-      element.removeEventListener("timeupdate", onTimeUpdate)
-      element.removeEventListener("seeked", onSeeked)
-      element.removeEventListener("pause", onPause)
-      element.removeEventListener("ended", onEnded)
+      removePositionListeners()
+      resume.clearDeadline()
 
-      if (restored) {
-        onPositionChange({ currentTime: element.currentTime, reason: "pause" })
+      if (canPersistPlaybackPosition(resumeStatusRef.current)) {
+        onPositionChange({
+          currentTime: nativePosition.capture(
+            element.currentTime,
+            element.seeking
+          ),
+          reason: "pause",
+        })
       }
     }
   }, [
@@ -196,6 +546,11 @@ function usePlaybackPositionTracking({
     nativeMediaRef,
     nativeVideoElement,
     onPositionChange,
+    getNativePosition,
+    cancelRecovery,
+    completeRecovery,
+    failRecovery,
+    updateResumeStatus,
   ])
 
   useEffect(() => {
@@ -203,25 +558,213 @@ function usePlaybackPositionTracking({
       return undefined
     }
 
+    let resumeSeekStarted = false
+
+    const resume = createResumeConfirmation({
+      targetTime: initialStartTimeSeconds,
+      getStatus: () => resumeStatusRef.current,
+      updateStatus: updateResumeStatus,
+      onFailed: () => engine.pause(),
+      onAccepted(currentTime, confirmed) {
+        if (confirmed) {
+          setInitialStartTimeSeconds(0)
+        }
+
+        onPositionChange({ currentTime, reason: "seek" })
+      },
+    })
+
+    const startResumeConfirmation = (loaded = false) => {
+      if (resumeSeekStarted || resumeStatusRef.current !== "pending") {
+        return
+      }
+
+      if (engine.duration <= 0) {
+        if (loaded) {
+          resume.fail()
+        }
+
+        return
+      }
+
+      resumeSeekStarted = true
+      resume.startDeadline()
+      void engine.seek(initialStartTimeSeconds)
+    }
+
     const unsubscribe = engine.listen((event) => {
       if (event.type === "timeupdate") {
-        onPositionChange({ currentTime: event.currentTime, reason: "progress" })
+        if (canPersistPlaybackPosition(resumeStatusRef.current)) {
+          onPositionChange({
+            currentTime: event.currentTime,
+            reason: "progress",
+          })
+        }
       } else if (event.type === "seeked") {
-        onPositionChange({ currentTime: event.currentTime, reason: "seek" })
+        resume.confirm(event.currentTime)
+      } else if (event.type === "seekfailed") {
+        resume.fail()
+      } else if (event.type === "loaded") {
+        startResumeConfirmation(true)
       } else if (event.type === "pause") {
-        onPositionChange({ currentTime: engine.currentTime, reason: "pause" })
+        if (canPersistPlaybackPosition(resumeStatusRef.current)) {
+          onPositionChange({ currentTime: engine.currentTime, reason: "pause" })
+        }
       } else if (event.type === "ended") {
-        onPositionChange({ currentTime: engine.currentTime, reason: "ended" })
+        if (canPersistPlaybackPosition(resumeStatusRef.current)) {
+          onPositionChange({ currentTime: engine.currentTime, reason: "ended" })
+        }
       }
     })
 
+    startResumeConfirmation()
+
     return () => {
-      onPositionChange({ currentTime: engine.currentTime, reason: "pause" })
+      resume.clearDeadline()
+
+      if (
+        canPersistPlaybackPosition(resumeStatusRef.current) &&
+        !engine.seeking
+      ) {
+        onPositionChange({ currentTime: engine.currentTime, reason: "pause" })
+      }
+
       unsubscribe()
     }
-  }, [engine, mode, onPositionChange])
+  }, [
+    engine,
+    initialStartTimeSeconds,
+    mode,
+    onPositionChange,
+    updateResumeStatus,
+  ])
 
-  return initialStartTimeSeconds
+  useEffect(() => {
+    return () => {
+      const operation = recoveryOperationRef.current
+
+      if (operation === null) {
+        return
+      }
+
+      if (operation.deadline !== null) {
+        clearTimeout(operation.deadline)
+      }
+
+      if (operation.mode === "native") {
+        nativePositionRef.current?.cancelSeek()
+      }
+
+      recoveryOperationRef.current = null
+    }
+  }, [])
+
+  const startNativeRecovery = useCallback(
+    (operation: RecoveryOperation) => {
+      const { element } = operation
+
+      if (
+        element === null ||
+        element.readyState < HTMLMediaElement.HAVE_METADATA ||
+        element.error !== null ||
+        !Number.isFinite(element.duration) ||
+        element.duration <= 0
+      ) {
+        failRecovery(operation)
+
+        return
+      }
+
+      element.pause()
+      getNativePosition().beginSeek(0)
+
+      try {
+        element.currentTime = 0
+      } catch {
+        failRecovery(operation)
+      }
+    },
+    [failRecovery, getNativePosition]
+  )
+
+  const startEngineRecovery = useCallback(
+    (operation: RecoveryOperation) => {
+      const { engine: recoveryEngine } = operation
+
+      if (recoveryEngine === null) {
+        failRecovery(operation)
+
+        return
+      }
+
+      recoveryEngine.pause()
+      void recoveryEngine
+        .seek(0)
+        .then((result) => {
+          if (!ownsRecovery(operation)) {
+            return
+          }
+
+          if (result.status !== "completed" || result.operationId === null) {
+            failRecovery(operation)
+
+            return
+          }
+
+          completeRecovery(operation, result.currentTime)
+        })
+        .catch(() => failRecovery(operation))
+    },
+    [completeRecovery, failRecovery, ownsRecovery]
+  )
+
+  const startFromBeginning = useCallback(() => {
+    if (
+      resumeStatusRef.current !== "failed" ||
+      recoveryOperationRef.current !== null
+    ) {
+      return
+    }
+
+    const operation: RecoveryOperation = {
+      mode,
+      engine,
+      element: mode === "native" ? nativeMediaRef.current : null,
+      deadline: null,
+    }
+
+    recoveryOperationRef.current = operation
+    setRecoveryStatus("pending")
+    operation.deadline = setTimeout(
+      () => failRecovery(operation),
+      RESUME_CONFIRMATION_DEADLINE_MS
+    )
+
+    if (mode === "native") {
+      startNativeRecovery(operation)
+
+      return
+    }
+
+    startEngineRecovery(operation)
+  }, [
+    engine,
+    failRecovery,
+    mode,
+    nativeMediaRef,
+    startEngineRecovery,
+    startNativeRecovery,
+  ])
+
+  return {
+    initialStartTimeSeconds,
+    engineStartTimeSeconds,
+    getNativePosition,
+    resumeStatus,
+    recoveryStatus,
+    startFromBeginning,
+    cancelRecovery,
+  }
 }
 
 // The native engine wins until it cannot do the job: a fatal native error,
@@ -235,6 +778,7 @@ export function PlaybackStage({
   onModeChange,
   onPositionChange,
   renderDetails,
+  dependencies,
 }: {
   source: PlaybackSource
   startTimeSeconds: number
@@ -242,6 +786,7 @@ export function PlaybackStage({
   onModeChange: (mode: PlaybackEngineMode) => void
   onPositionChange: (change: PlaybackPositionChange) => void
   renderDetails?: (details: PlaybackStageDetails) => ReactNode
+  dependencies?: Partial<PlaybackStageDependencies>
 }) {
   const [mode, setMode] = useState<PlaybackEngineMode>("native")
   const [snapshot, setSnapshot] = useState<MigrationSnapshot | null>(null)
@@ -255,14 +800,25 @@ export function PlaybackStage({
   // The probe opens containers; a playlist is not one, and fetching it just
   // to fail would waste a round trip against a signed URL. The stage is
   // keyed by source URL, so the source kind never changes within a mount.
-  const { hlsSource, probeState, matroskaUrl } = usePlaybackSource(source)
+  const { hlsSource, probeState, matroskaUrl } = usePlaybackSource(
+    source,
+    dependencies?.probeSource ?? probeSource
+  )
 
   const nativeMediaRef = useRef<HTMLVideoElement | null>(null)
 
   const [nativeVideoElement, setNativeVideoElement] =
     useState<HTMLVideoElement | null>(null)
 
-  const initialStartTimeSeconds = usePlaybackPositionTracking({
+  const {
+    initialStartTimeSeconds,
+    engineStartTimeSeconds,
+    getNativePosition,
+    resumeStatus,
+    recoveryStatus,
+    startFromBeginning,
+    cancelRecovery,
+  } = usePlaybackPositionTracking({
     mode,
     nativeMediaRef,
     nativeVideoElement,
@@ -337,12 +893,14 @@ export function PlaybackStage({
   // advanced engine reports its actual selection.
   const migrateToEngine = useCallback(
     (nextAudioTrackId: string | null, element: HTMLVideoElement | null) => {
+      cancelRecovery()
       setSnapshot({
-        time:
-          element !== null &&
-          element.readyState >= HTMLMediaElement.HAVE_METADATA
-            ? element.currentTime
-            : initialStartTimeSeconds,
+        time: migrationStartTime({
+          status: resumeStatus,
+          initialTime: initialStartTimeSeconds,
+          element,
+          confirmedPosition: getNativePosition(),
+        }),
         wasPlaying: element !== null && !element.paused,
         volume: element?.volume ?? 1,
         muted: element?.muted ?? false,
@@ -357,7 +915,14 @@ export function PlaybackStage({
         setSelectedAudioTrackId(nextAudioTrackId)
       }
     },
-    [initialStartTimeSeconds, onModeChange, selectedSubtitleId]
+    [
+      getNativePosition,
+      initialStartTimeSeconds,
+      onModeChange,
+      resumeStatus,
+      selectedSubtitleId,
+      cancelRecovery,
+    ]
   )
 
   useEffect(() => {
@@ -470,14 +1035,14 @@ export function PlaybackStage({
   const engineInit = useMemo<EngineInit>(
     () => ({
       source,
-      startTime: snapshot?.time ?? initialStartTimeSeconds,
+      startTime: snapshot?.time ?? engineStartTimeSeconds,
       autoPlay: snapshot?.wasPlaying ?? true,
       volume: snapshot?.volume ?? 1,
       muted: snapshot?.muted ?? false,
       playbackRate: snapshot?.playbackRate ?? 1,
       audioTrackId: snapshot?.audioTrackId ?? null,
     }),
-    [initialStartTimeSeconds, source, snapshot]
+    [engineStartTimeSeconds, source, snapshot]
   )
 
   const contextValues = useMemo(() => {
@@ -563,6 +1128,11 @@ export function PlaybackStage({
                     onUnavailable={markSubtitleIncomplete}
                   />
                 ) : null}
+                <ResumeRecoveryNotice
+                  visible={resumeStatus === "failed"}
+                  status={recoveryStatus}
+                  onStartFromBeginning={startFromBeginning}
+                />
               </VideoSkin>
             </VideoPlayer>
           ) : (
@@ -571,6 +1141,9 @@ export function PlaybackStage({
                 <SubtitlePlaybackStatus track={selectedSubtitleTrack} />
                 <MediabunnyVideo
                   init={engineInit}
+                  createEngine={
+                    dependencies?.createEngine ?? createMediabunnyEngine
+                  }
                   onEngine={setEngine}
                   onSelectedAudioTrackId={setSelectedAudioTrackId}
                   onAdapter={(nextAdapter) => {
@@ -620,6 +1193,11 @@ export function PlaybackStage({
                     onFailure={failSubtitle}
                   />
                 ) : null}
+                <ResumeRecoveryNotice
+                  visible={resumeStatus === "failed"}
+                  status={recoveryStatus}
+                  onStartFromBeginning={startFromBeginning}
+                />
               </VideoSkin>
             </VideoPlayer>
           )}
@@ -637,9 +1215,12 @@ export function PlaybackStage({
   )
 }
 
-function usePlaybackSource(source: PlaybackSource) {
+function usePlaybackSource(
+  source: PlaybackSource,
+  sourceProbe: typeof probeSource
+) {
   const hlsSource = isHlsUrl(source.url)
-  const probeState = useSourceProbe(source, hlsSource)
+  const probeState = useSourceProbe(source, hlsSource, sourceProbe)
   const matroskaUrl = findMatroskaUrl(source.url, hlsSource, probeState)
 
   return { hlsSource, probeState, matroskaUrl }
@@ -647,7 +1228,8 @@ function usePlaybackSource(source: PlaybackSource) {
 
 function useSourceProbe(
   source: PlaybackSource,
-  hlsSource: boolean
+  hlsSource: boolean,
+  sourceProbe: typeof probeSource
 ): ProbeState {
   const [probeState, setProbeState] = useState<ProbeState>(() =>
     hlsSource ? { status: "failed" } : { status: "loading" }
@@ -660,7 +1242,7 @@ function useSourceProbe(
 
     const controller = new AbortController()
 
-    probeSource(source, controller.signal)
+    sourceProbe(source, controller.signal)
       .then((result) => {
         setProbeState({ status: "ready", result })
       })
@@ -672,7 +1254,7 @@ function useSourceProbe(
       })
 
     return () => controller.abort()
-  }, [source, hlsSource])
+  }, [source, hlsSource, sourceProbe])
 
   return probeState
 }

@@ -44,6 +44,10 @@ export class MediabunnyMediaAdapter extends EventTarget {
         this.dispatch("durationchange")
         this.dispatch("loadeddata")
         break
+      case "waiting":
+        this.readyStateValue = HAVE_METADATA
+        this.dispatch("waiting")
+        break
       case "playing":
         this.readyStateValue = HAVE_ENOUGH_DATA
         this.dispatch("canplay")
@@ -58,6 +62,10 @@ export class MediabunnyMediaAdapter extends EventTarget {
       case "volumechange":
       case "ratechange":
         this.dispatch(event.type)
+        break
+      case "seekfailed":
+        this.dispatch("seekerror")
+        this.dispatch("seeked")
         break
       case "error":
         this.errorValue = { code: event.code, message: event.message }

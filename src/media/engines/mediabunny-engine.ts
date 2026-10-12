@@ -14,6 +14,7 @@ import type {
   WrappedCanvas,
 } from "mediabunny"
 
+import { MediaDiagnostics } from "../models/diagnostics"
 import type { PlaybackSource } from "../models/source"
 import { proxiedMediaUrl } from "../proxy/proxied-url"
 
@@ -34,6 +35,36 @@ export interface EngineInit {
   audioTrackId: string | null
 }
 
+export interface MediabunnyEngineDependencies {
+  createInput: (
+    source: PlaybackSource,
+    attachInput: (input: EngineInput) => void
+  ) => Promise<EngineInput>
+  createAudioContext: () => AudioContext
+  createAudioSink: (track: EngineAudioTrack) => Promise<AudioBufferSink>
+  createCanvasSink: (
+    track: InputVideoTrack,
+    poolSize: number,
+    preferHardware: boolean
+  ) => Promise<CanvasSink>
+}
+
+interface EngineInput {
+  dispose: () => void
+  getPrimaryVideoTrack: () => Promise<InputVideoTrack | null>
+  getAudioTracks: () => Promise<EngineAudioTrack[]>
+  getPrimaryAudioTrack: () => Promise<EngineAudioTrack | null>
+  getDurationFromMetadata: () => Promise<number | null>
+  computeDuration: () => Promise<number>
+}
+
+interface EngineAudioTrack {
+  type: "audio" | "subtitle" | "video"
+  number: number
+  getCodecParameterString: () => Promise<string | null>
+  getLanguageCode: () => Promise<string>
+}
+
 export type EngineStateEvent =
   | {
       type: "loaded"
@@ -44,15 +75,23 @@ export type EngineStateEvent =
       selectedAudioTrackId: string | null
     }
   | { type: "timeupdate"; currentTime: number }
-  | { type: "seeking" }
-  | { type: "seeked"; currentTime: number }
+  | { type: "seeking"; operationId: number }
+  | { type: "seeked"; currentTime: number; operationId: number }
+  | { type: "seekfailed"; currentTime: number; operationId: number }
   | { type: "play" }
+  | { type: "waiting" }
   | { type: "playing" }
   | { type: "pause" }
   | { type: "ended" }
   | { type: "volumechange" }
   | { type: "ratechange" }
   | { type: "error"; code: number; message: string }
+
+export interface EngineSeekResult {
+  status: "completed" | "failed" | "superseded" | "unavailable"
+  operationId: number | null
+  currentTime: number
+}
 
 // Kept near two frames: the canvas pool is a ring buffer, so queueing more
 // frames than the pool lets later decodes overwrite queued canvases.
@@ -61,6 +100,8 @@ const VIDEO_LOOKAHEAD_SECONDS = 0.1
 const CANVAS_POOL_SIZE = 4
 
 const MAX_QUEUED_AUDIO_BUFFERS = 32
+
+const MIN_AUDIO_PREROLL_SECONDS = 0.15
 
 const TIMEUPDATE_INTERVAL_MS = 250
 
@@ -80,6 +121,107 @@ class NoPlayableTracksError extends Error {
 interface ActiveAudioNode {
   node: AudioBufferSourceNode
   ended: Promise<void>
+  buffer: AudioBuffer
+  timestamp: number
+}
+
+interface AudioBufferSchedule {
+  startAt: number
+  sourceOffset: number
+}
+
+interface AudioNodeSchedule extends AudioBufferSchedule {
+  buffer: AudioBuffer
+  timestamp: number
+  gain: GainNode
+}
+
+interface SeekOperation {
+  id: number
+  targetTime: number
+  previousTime: number
+  wasPlaying: boolean
+}
+
+interface AudioRunToken {
+  generation: number
+  audioGeneration: number
+}
+
+interface PlaybackCancellation {
+  requestId: number
+  promise: Promise<null>
+  cancel: () => void
+}
+
+interface CancellationSignal {
+  promise: Promise<null>
+  cancel: () => void
+}
+
+interface PreparedAudio {
+  iterator: AsyncGenerator<WrappedAudioBuffer> | null
+  buffers: WrappedAudioBuffer[]
+  exhausted: boolean
+}
+
+interface PreparedVideo {
+  iterator: AsyncGenerator<WrappedCanvas> | null
+  firstFrame: WrappedCanvas | null
+  gap: boolean
+}
+
+type VideoFrameReadiness =
+  | { kind: "invalid" }
+  | { kind: "expired" }
+  | { kind: "covering"; frame: WrappedCanvas }
+  | { kind: "gap"; frame: WrappedCanvas }
+  | { kind: "after-end" }
+
+interface PreparedPlayback {
+  audio: PreparedAudio
+  video: PreparedVideo
+}
+
+type ScheduledAudioBuffer = Pick<WrappedAudioBuffer, "buffer" | "timestamp">
+
+function classifyVideoFrame(
+  frame: WrappedCanvas,
+  requestedTime: number,
+  duration: number
+): VideoFrameReadiness {
+  const frameEnd = frame.timestamp + frame.duration
+
+  if (
+    !Number.isFinite(frame.timestamp) ||
+    !Number.isFinite(frame.duration) ||
+    frame.duration <= 0 ||
+    !Number.isFinite(frameEnd)
+  ) {
+    return { kind: "invalid" }
+  }
+
+  if (frame.timestamp <= requestedTime && requestedTime < frameEnd) {
+    return { kind: "covering", frame }
+  }
+
+  if (frame.timestamp > requestedTime) {
+    return frame.timestamp >= duration
+      ? { kind: "after-end" }
+      : { kind: "gap", frame }
+  }
+
+  return { kind: "expired" }
+}
+
+function createCancellationSignal(): CancellationSignal {
+  let resolveCancellation!: (result: null) => void
+
+  const promise = new Promise<null>((resolve) => {
+    resolveCancellation = resolve
+  })
+
+  return { promise, cancel: () => resolveCancellation(null) }
 }
 
 async function createInputFor(
@@ -146,7 +288,7 @@ async function createInputFor(
 // Registers the focused WASM decoder only when the selected audio track
 // needs it, so AAC/Opus playback never downloads the WASM bundle.
 async function ensureAudioDecoderRegistered(
-  track: InputAudioTrack
+  track: EngineAudioTrack
 ): Promise<void> {
   const codec = await track.getCodecParameterString()
 
@@ -168,27 +310,36 @@ async function ensureAudioDecoderRegistered(
 
 export class MediabunnyEngine {
   private readonly init: EngineInit
+  private readonly dependencies: MediabunnyEngineDependencies
+  private readonly diagnostics = new MediaDiagnostics()
   private readonly listeners: ((event: EngineStateEvent) => void)[] = []
 
   private disposed = false
   private generation = 0
+  private videoGeneration = 0
   private audioGeneration = 0
+  private seekOperationId = 0
+  private seekRecoveryTime: number
+  private playbackRequestId = 0
+  private playbackCancellation: PlaybackCancellation | null = null
 
-  private input: Input | null = null
+  private input: EngineInput | null = null
   private audioContext: AudioContext | null = null
   private masterGain: GainNode | null = null
 
   private videoTrack: InputVideoTrack | null = null
-  private audioTracks: InputAudioTrack[] = []
-  private selectedAudioTrack: InputAudioTrack | null = null
+  private audioTracks: EngineAudioTrack[] = []
+  private selectedAudioTrack: EngineAudioTrack | null = null
 
-  private canvasSink: CanvasSink | null = null
   private canvasIterator: AsyncGenerator<WrappedCanvas> | null = null
   private audioSink: AudioBufferSink | null = null
   private audioIterator: AsyncGenerator<WrappedAudioBuffer> | null = null
 
   private displayCanvas: HTMLCanvasElement | null = null
-  private frameQueue: { canvas: HTMLCanvasElement; timestamp: number }[] = []
+  private frameQueue: {
+    canvas: HTMLCanvasElement | OffscreenCanvas
+    timestamp: number
+  }[] = []
   private lastBlittedTimestamp = -1
   private pullingFrame = false
 
@@ -196,6 +347,8 @@ export class MediabunnyEngine {
   private anchorMediaTime = 0
   private frozenMediaTime = 0
   private playing = false
+  private playPending = false
+  private buffering = false
   private endedFlag = false
   private audioFeedExhausted = false
   private seekingFlag = false
@@ -207,7 +360,9 @@ export class MediabunnyEngine {
   private heightValue: number | null = null
 
   private activeAudioNodes: ActiveAudioNode[] = []
+  private pendingAudioBuffers: ScheduledAudioBuffer[] = []
   private renderFrame: number | null = null
+  private videoTick: (() => void) | null = null
   private lastTimeupdateAt = 0
   private tracksValue: EngineTrack[] = []
 
@@ -219,9 +374,53 @@ export class MediabunnyEngine {
   // batch of buffers serializes instead of stacking on the same instant.
   private lastScheduledAudioEnd = 0
 
-  constructor(init: EngineInit) {
+  constructor(
+    init: EngineInit,
+    dependencies: Partial<MediabunnyEngineDependencies> = {}
+  ) {
     this.init = init
+    this.dependencies = {
+      createInput:
+        dependencies.createInput ??
+        (async (source, attachInput) => {
+          const { input: mediaInput } = await createInputFor(
+            source,
+            (createdInput) => {
+              attachInput(createdInput)
+            }
+          )
+
+          return mediaInput
+        }),
+      createAudioContext:
+        dependencies.createAudioContext ?? (() => new AudioContext()),
+      createAudioSink:
+        dependencies.createAudioSink ??
+        (async (track) => {
+          const { AudioBufferSink: Sink } = await import("mediabunny")
+
+          // SAFETY: EngineAudioTrack is the subset exposed by real Mediabunny audio tracks.
+          return new Sink(track as InputAudioTrack)
+        }),
+      createCanvasSink:
+        dependencies.createCanvasSink ??
+        (async (track, poolSize, preferHardware) => {
+          const { CanvasSink: Sink } = await import("mediabunny")
+
+          const options = { poolSize }
+
+          if (preferHardware) {
+            return new Sink(track, {
+              ...options,
+              decoderOptions: { hardwareAcceleration: "prefer-hardware" },
+            })
+          }
+
+          return new Sink(track, options)
+        }),
+    }
     this.frozenMediaTime = init.startTime
+    this.seekRecoveryTime = init.startTime
     this.volumeValue = init.volume
     this.mutedValue = init.muted
     this.rateValue = init.playbackRate
@@ -250,6 +449,8 @@ export class MediabunnyEngine {
   }
 
   async load(): Promise<void> {
+    this.diagnostics.record({ stage: "source", event: "loading" })
+
     try {
       await this.openInput()
 
@@ -265,6 +466,11 @@ export class MediabunnyEngine {
 
       this.createAudioContext()
       this.notifyLoaded()
+      this.diagnostics.record({
+        stage: "source",
+        event: "ready",
+        mediaTime: this.frozenMediaTime,
+      })
 
       if (this.init.autoPlay) {
         await this.play()
@@ -284,17 +490,25 @@ export class MediabunnyEngine {
       }
 
       this.fail(error instanceof Error ? error.message : String(error), code)
+      this.diagnostics.record({
+        stage: "source",
+        event: "failed",
+        errorCode: code,
+      })
     }
   }
 
   private async openInput(): Promise<void> {
-    const { input } = await createInputFor(this.init.source, (nextInput) => {
-      this.input = nextInput
+    const input = await this.dependencies.createInput(
+      this.init.source,
+      (nextInput) => {
+        this.input = nextInput
 
-      if (this.disposed) {
-        nextInput.dispose()
+        if (this.disposed) {
+          nextInput.dispose()
+        }
       }
-    })
+    )
 
     if (this.disposed) {
       input.dispose()
@@ -306,7 +520,7 @@ export class MediabunnyEngine {
   }
 
   private createAudioContext(): void {
-    this.audioContext = new AudioContext()
+    this.audioContext = this.dependencies.createAudioContext()
     this.masterGain = this.audioContext.createGain()
     this.masterGain.connect(this.audioContext.destination)
     this.applyGain()
@@ -384,7 +598,7 @@ export class MediabunnyEngine {
     ]
   }
 
-  trackId(track: InputAudioTrack | InputVideoTrack): string {
+  trackId(track: EngineAudioTrack | InputVideoTrack): string {
     return `${track.type}-${track.number}`
   }
 
@@ -405,7 +619,7 @@ export class MediabunnyEngine {
   }
 
   get paused(): boolean {
-    return !this.playing
+    return !this.playing && !this.playPending
   }
 
   get ended(): boolean {
@@ -413,7 +627,7 @@ export class MediabunnyEngine {
   }
 
   get currentTime(): number {
-    if (!this.playing || this.audioContext === null) {
+    if (!this.playing || this.buffering || this.audioContext === null) {
       return this.frozenMediaTime
     }
 
@@ -455,12 +669,21 @@ export class MediabunnyEngine {
       : this.trackId(this.selectedAudioTrack)
   }
 
+  get diagnosticSnapshot() {
+    return this.diagnostics.snapshot()
+  }
+
   get seeking(): boolean {
     return this.seekingFlag
   }
 
   async play(): Promise<void> {
-    if (this.disposed || this.playing || this.input === null) {
+    if (
+      this.disposed ||
+      this.playing ||
+      this.playPending ||
+      this.input === null
+    ) {
       return
     }
 
@@ -469,33 +692,67 @@ export class MediabunnyEngine {
     }
 
     this.endedFlag = false
+    const requestId = ++this.playbackRequestId
+    const cancellation = this.createPlaybackCancellation(requestId)
+    this.playPending = true
+    this.notify({ type: "play" })
+    this.notify({ type: "waiting" })
 
-    if (this.audioContext.state === "suspended") {
-      await this.audioContext.resume().catch(() => {
-        // Autoplay policy: the context needs a user gesture. Stay paused
-        // with a frame on screen; the skin's play button starts playback.
-      })
+    await this.resumeAndStartPlayback(requestId, cancellation)
+  }
+
+  private async resumeAndStartPlayback(
+    requestId: number,
+    cancellation: PlaybackCancellation
+  ): Promise<void> {
+    const context = this.audioContext
+
+    if (context === null) {
+      return
     }
 
-    if (this.audioContext.state !== "running") {
+    if (context.state === "suspended") {
+      await Promise.race([
+        context.resume().catch(() => {
+          // Autoplay policy: the context needs a user gesture. Stay paused
+          // with a frame on screen; the skin's play button starts playback.
+        }),
+        cancellation.promise,
+      ])
+    }
+
+    if (!this.isCurrentPlaybackRequest(requestId)) {
+      return
+    }
+
+    if (context.state !== "running") {
+      this.playPending = false
+      this.playbackRequestId += 1
+      this.clearPlaybackCancellation(requestId)
       void this.blitFrameAt(this.frozenMediaTime)
+      this.notify({ type: "pause" })
 
       return
     }
 
-    this.playing = true
-    this.startPlayback(this.frozenMediaTime)
-    this.notify({ type: "play" })
-    this.notify({ type: "playing" })
+    this.clearPlaybackCancellation(requestId)
+    await this.startPlayback(this.frozenMediaTime, true)
   }
 
   pause(): void {
-    if (!this.playing) {
+    if (!this.playing && !this.playPending) {
       return
     }
 
-    this.frozenMediaTime = this.currentMediaTime()
+    if (this.playing) {
+      this.frozenMediaTime = this.currentMediaTime()
+    }
+
+    this.cancelPendingPlayback()
+    this.playbackRequestId += 1
     this.playing = false
+    this.playPending = false
+    this.buffering = false
     this.stopPlayback()
     this.notify({ type: "pause" })
   }
@@ -515,6 +772,12 @@ export class MediabunnyEngine {
   setPlaybackRate(rate: number): void {
     if (!this.playing) {
       this.rateValue = rate
+      this.diagnostics.record({
+        stage: "audio",
+        event: "rate-change",
+        mediaTime: this.frozenMediaTime,
+        playbackRate: rate,
+      })
       this.notify({ type: "ratechange" })
 
       return
@@ -523,83 +786,251 @@ export class MediabunnyEngine {
     this.frozenMediaTime = this.currentMediaTime()
     this.rateValue = rate
     this.reanchor(this.frozenMediaTime)
+    this.rescheduleAudioQueue()
+    this.diagnostics.record({
+      stage: "audio",
+      event: "rate-change",
+      mediaTime: this.frozenMediaTime,
+      playbackRate: rate,
+    })
     this.notify({ type: "ratechange" })
   }
 
-  async seek(time: number): Promise<void> {
-    const clamped = Math.max(0, Math.min(time, this.durationValue))
-
-    this.seekingFlag = true
-    this.notify({ type: "seeking" })
-
-    const wasPlaying = this.playing
-
-    if (wasPlaying) {
-      this.playing = false
-      this.stopPlayback()
+  async seek(time: number): Promise<EngineSeekResult> {
+    if (!Number.isFinite(time)) {
+      return {
+        status: "failed",
+        operationId: null,
+        currentTime: this.currentTime,
+      }
     }
 
-    this.frozenMediaTime = clamped
-    this.endedFlag = false
+    if (
+      this.disposed ||
+      this.input === null ||
+      this.audioContext === null ||
+      this.durationValue <= 0
+    ) {
+      return {
+        status: "unavailable",
+        operationId: null,
+        currentTime: this.currentTime,
+      }
+    }
+
+    const operation = this.beginSeek(time)
 
     try {
-      if (wasPlaying && this.audioContext !== null) {
-        if (this.audioContext.state === "suspended") {
-          await this.audioContext.resume().catch(() => {
-            // Same autoplay-policy hole as play(): without a running
-            // context there is no clock to resume onto.
-          })
-        }
+      const completed = await this.performSeek(operation)
 
-        if (this.audioContext.state === "running") {
-          this.playing = true
-          this.startPlayback(clamped)
-        } else {
-          await this.blitFrameAt(clamped)
+      if (!this.isCurrentSeek(operation.id) || completed === null) {
+        return {
+          status: this.disposed ? "unavailable" : "superseded",
+          operationId: operation.id,
+          currentTime: this.currentTime,
         }
-      } else {
-        await this.blitFrameAt(clamped)
+      }
+
+      if (completed) {
+        this.completeSeek(operation)
+
+        return {
+          status: "completed",
+          operationId: operation.id,
+          currentTime: operation.targetTime,
+        }
+      }
+
+      this.failSeek(operation)
+
+      return {
+        status: "failed",
+        operationId: operation.id,
+        currentTime: operation.previousTime,
+      }
+    } catch {
+      if (this.isCurrentSeek(operation.id)) {
+        this.failSeek(operation)
+
+        return {
+          status: "failed",
+          operationId: operation.id,
+          currentTime: operation.previousTime,
+        }
+      }
+
+      return {
+        status: this.disposed ? "unavailable" : "superseded",
+        operationId: operation.id,
+        currentTime: this.currentTime,
       }
     } finally {
-      this.seekingFlag = false
-      this.notify({ type: "seeked", currentTime: clamped })
+      if (this.isCurrentSeek(operation.id)) {
+        this.seekingFlag = false
+      }
     }
   }
 
+  private beginSeek(time: number): SeekOperation {
+    const targetTime = Math.max(0, Math.min(time, this.durationValue))
+    const wasPlaying = this.playing || this.playPending
+
+    if (!this.seekingFlag) {
+      this.seekRecoveryTime = this.playing
+        ? this.currentMediaTime()
+        : this.frozenMediaTime
+    }
+
+    const previousTime = this.seekRecoveryTime
+
+    const id = ++this.seekOperationId
+
+    this.seekingFlag = true
+    this.diagnostics.record({
+      stage: "seek",
+      event: "seeking",
+      mediaTime: targetTime,
+      operationId: id,
+    })
+    this.notify({ type: "seeking", operationId: id })
+
+    if (wasPlaying) {
+      this.cancelPendingPlayback()
+      this.playbackRequestId += 1
+      this.playing = false
+      this.playPending = false
+      this.stopPlayback()
+    }
+
+    this.frozenMediaTime = targetTime
+    this.endedFlag = false
+
+    return { id, targetTime, previousTime, wasPlaying }
+  }
+
+  private async performSeek(operation: SeekOperation): Promise<boolean | null> {
+    const context = this.audioContext
+
+    if (operation.wasPlaying && context !== null) {
+      if (context.state === "suspended") {
+        await context.resume().catch(() => {
+          // Same autoplay-policy hole as play(): without a running
+          // context there is no clock to resume onto.
+        })
+      }
+
+      if (!this.isCurrentSeek(operation.id)) {
+        return null
+      }
+
+      if (context.state === "running") {
+        const started = await this.startPlayback(operation.targetTime)
+
+        if (!this.isCurrentSeek(operation.id)) {
+          return null
+        }
+
+        return started
+      }
+    }
+
+    return this.blitFrameAt(operation.targetTime, operation.id)
+  }
+
+  private completeSeek(operation: SeekOperation): void {
+    this.seekRecoveryTime = operation.targetTime
+    this.seekingFlag = false
+    this.diagnostics.record({
+      stage: "seek",
+      event: "seeked",
+      mediaTime: operation.targetTime,
+      operationId: operation.id,
+    })
+    this.notify({
+      type: "seeked",
+      currentTime: operation.targetTime,
+      operationId: operation.id,
+    })
+  }
+
+  private failSeek(operation: SeekOperation): void {
+    this.frozenMediaTime = operation.previousTime
+    this.seekRecoveryTime = operation.previousTime
+    this.seekingFlag = false
+    this.diagnostics.record({
+      stage: "seek",
+      event: "failed",
+      mediaTime: operation.targetTime,
+      operationId: operation.id,
+    })
+    this.notify({
+      type: "seekfailed",
+      currentTime: operation.previousTime,
+      operationId: operation.id,
+    })
+  }
+
   // One-shot frame decode so seeking while paused still moves the picture.
-  private async blitFrameAt(time: number): Promise<void> {
+  private async blitFrameAt(
+    time: number,
+    seekOperationId?: number
+  ): Promise<boolean> {
     const track = this.videoTrack
     const { generation } = this
+    const operationId = seekOperationId ?? this.seekOperationId
 
     if (track === null || this.displayCanvas === null) {
-      return
+      return track === null && this.audioTracks.length > 0
     }
 
-    const { CanvasSink } = await import("mediabunny")
+    if (time >= this.durationValue) {
+      this.diagnostics.record({
+        stage: "video",
+        event: "end-of-stream",
+        mediaTime: time,
+      })
 
-    if (this.disposed || generation !== this.generation) {
-      return
+      return true
     }
 
-    const sink = new CanvasSink(track, { poolSize: 1 })
+    const sink = await this.dependencies.createCanvasSink(track, 1, false)
+
+    if (
+      this.disposed ||
+      generation !== this.generation ||
+      !this.isCurrentSeek(operationId)
+    ) {
+      return false
+    }
 
     // Paused-seek decode is cosmetic: on failure the previous frame stays
     // on screen, and the next seek or play retries with a fresh sink.
     const wrapped = await sink.getCanvas(time).catch(() => null)
 
-    if (this.disposed || generation !== this.generation) {
-      return
+    if (
+      this.disposed ||
+      generation !== this.generation ||
+      !this.isCurrentSeek(operationId)
+    ) {
+      return false
     }
 
-    if (wrapped !== null && wrapped.canvas instanceof HTMLCanvasElement) {
-      this.lastBlittedTimestamp = wrapped.timestamp
-      this.blit(wrapped.canvas)
+    if (wrapped === null) {
+      return false
     }
+
+    this.lastBlittedTimestamp = wrapped.timestamp
+    this.blit(wrapped.canvas)
+
+    return true
   }
 
-  // Switches the audio track without moving the playback position: stops
-  // queued audio nodes and the audio iterator, then restarts the iterator
-  // from the frozen time on the new track.
+  private isCurrentSeek(operationId: number): boolean {
+    return !this.disposed && operationId === this.seekOperationId
+  }
+
+  // A playing track switch re-primes both media sinks from one frozen time so
+  // neither side advances while the new audio decoder is getting ready.
   async selectAudioTrack(trackId: string): Promise<void> {
     const track = this.audioTracks.find(
       (candidate) => this.trackId(candidate) === trackId
@@ -611,31 +1042,30 @@ export class MediabunnyEngine {
 
     await ensureAudioDecoderRegistered(track)
 
-    const wasPlaying = this.playing
+    const wasPlaying = this.playing || this.playPending
 
-    if (wasPlaying) {
-      this.frozenMediaTime = this.currentMediaTime()
-      this.playing = false
-    }
+    const resumeTime = this.playing
+      ? this.currentMediaTime()
+      : this.frozenMediaTime
+
+    this.frozenMediaTime = resumeTime
+    this.cancelPendingPlayback()
+    this.playbackRequestId += 1
+    this.playing = false
+    this.playPending = false
+    this.buffering = false
 
     // Stop unconditionally: a run may still be filling asynchronously even
     // while paused, and its iterator must be returned before the reference
     // is dropped or its WASM decoder and fetches leak.
-    this.stopAudio()
+    this.stopPlayback()
 
     this.selectedAudioTrack = track
     this.audioSink = null
     this.audioIterator = null
 
     if (wasPlaying && this.audioContext !== null) {
-      this.playing = true
-      const { generation, audioGeneration } = this
-
-      void this.runAudioTask(
-        this.startAudio(this.frozenMediaTime),
-        generation,
-        audioGeneration
-      )
+      await this.startPlayback(this.frozenMediaTime)
     }
   }
 
@@ -646,7 +1076,10 @@ export class MediabunnyEngine {
 
     this.disposed = true
     this.generation += 1
+    this.cancelPendingPlayback()
+    this.playbackRequestId += 1
     this.playing = false
+    this.playPending = false
     this.stopPlayback()
     this.input?.dispose()
     void this.audioContext?.close().catch(() => {
@@ -656,14 +1089,29 @@ export class MediabunnyEngine {
   }
 
   private currentMediaTime(): number {
-    if (this.audioContext === null) {
+    if (this.audioContext === null || this.buffering) {
       return this.frozenMediaTime
     }
 
-    return (
+    const clockTime =
       this.anchorMediaTime +
       (this.audioContext.currentTime - this.anchorContextTime) * this.rateValue
-    )
+
+    if (
+      this.playing &&
+      this.selectedAudioTrack !== null &&
+      !this.audioFeedExhausted &&
+      this.audioRunPrimed &&
+      this.lastScheduledAudioEnd > 0
+    ) {
+      const audioCoverageEnd =
+        this.anchorMediaTime +
+        (this.lastScheduledAudioEnd - this.anchorContextTime) * this.rateValue
+
+      return Math.min(clockTime, audioCoverageEnd)
+    }
+
+    return clockTime
   }
 
   private reanchor(mediaTime: number): void {
@@ -680,16 +1128,378 @@ export class MediabunnyEngine {
     }
   }
 
-  private startPlayback(fromTime: number): void {
+  private async startPlayback(
+    fromTime: number,
+    waitingAlready = false
+  ): Promise<boolean> {
+    const requestId = ++this.playbackRequestId
+
+    const cancellation = this.beginPlaybackPreparation(
+      fromTime,
+      requestId,
+      waitingAlready
+    )
+
+    if (fromTime >= this.durationValue) {
+      this.clearPlaybackCancellation(requestId)
+      this.finishPlaybackAtEndOfStream()
+
+      return true
+    }
+
+    try {
+      const result = await Promise.race([
+        this.preparePlayback(fromTime, requestId).then((prepared) => ({
+          prepared,
+        })),
+        cancellation.promise,
+      ])
+
+      if (result === null || !this.isCurrentPlaybackRequest(requestId)) {
+        return false
+      }
+
+      this.clearPlaybackCancellation(requestId)
+      this.commitPreparedPlayback(fromTime, result.prepared)
+
+      return true
+    } catch (error) {
+      if (!this.isCurrentPlaybackRequest(requestId)) {
+        return false
+      }
+
+      this.clearPlaybackCancellation(requestId)
+      this.failPlaybackPreparation(
+        error instanceof Error ? error.message : String(error)
+      )
+
+      return false
+    }
+  }
+
+  private beginPlaybackPreparation(
+    fromTime: number,
+    requestId: number,
+    waitingAlready: boolean
+  ): PlaybackCancellation {
+    this.cancelPendingPlayback()
+    this.stopPlayback()
+    this.playing = false
+    this.playPending = true
+    this.buffering = false
+    const cancellation = this.createPlaybackCancellation(requestId)
+
+    if (!waitingAlready) {
+      this.notify({ type: "waiting" })
+    }
+
+    this.diagnostics.record({
+      stage: "playback",
+      event: "priming",
+      mediaTime: fromTime,
+    })
+
+    return cancellation
+  }
+
+  private commitPreparedPlayback(
+    fromTime: number,
+    prepared: PreparedPlayback
+  ): void {
+    this.playPending = false
+    this.playing = true
+    this.frozenMediaTime = fromTime
     this.reanchor(fromTime)
-    const { generation, audioGeneration } = this
+    this.audioFeedExhausted = prepared.audio.exhausted
+    this.audioRunPrimed = true
+    this.pendingAudioBuffers = []
+
+    if (prepared.video.gap) {
+      this.diagnostics.record({
+        stage: "video",
+        event: "gap",
+        mediaTime: fromTime,
+      })
+    }
+
+    for (const wrapped of prepared.audio.buffers) {
+      this.scheduleAudioBuffer(wrapped.buffer, wrapped.timestamp)
+    }
+
+    this.startPreparedAudioRun(fromTime, prepared.audio)
+    this.startPreparedVideoRun(prepared.video)
+    this.diagnostics.record({
+      stage: "playback",
+      event: "primed",
+      mediaTime: fromTime,
+    })
+    this.notify({ type: "playing" })
+  }
+
+  private startPreparedAudioRun(fromTime: number, audio: PreparedAudio): void {
+    if (audio.iterator === null || audio.exhausted) {
+      return
+    }
+
+    this.audioIterator = audio.iterator
+
+    const run = {
+      generation: this.generation,
+      audioGeneration: this.audioGeneration,
+    }
 
     void this.runAudioTask(
-      this.startAudio(fromTime),
-      generation,
-      audioGeneration
+      this.startAudio(fromTime, audio.iterator),
+      run.generation,
+      run.audioGeneration
     )
-    void this.runVideoTask(this.startVideoLoop(), generation)
+  }
+
+  private startPreparedVideoRun(video: PreparedVideo): void {
+    const run = {
+      generation: this.generation,
+      videoGeneration: this.videoGeneration,
+    }
+
+    void this.runVideoTask(
+      this.startVideoLoop(video),
+      run.generation,
+      run.videoGeneration
+    )
+  }
+
+  private failPlaybackPreparation(message: string): void {
+    this.playPending = false
+    this.playing = false
+    this.stopPlayback()
+    this.notify({ type: "pause" })
+    this.diagnostics.record({
+      stage: "playback",
+      event: "prime-failed",
+      errorCode: MEDIA_ERR_DECODE,
+    })
+    this.fail(message, MEDIA_ERR_DECODE)
+  }
+
+  private finishPlaybackAtEndOfStream(): void {
+    this.playPending = false
+    this.playing = false
+    this.buffering = false
+    this.frozenMediaTime = this.durationValue
+    this.endedFlag = true
+    this.stopPlayback()
+
+    if (this.videoTrack !== null) {
+      this.diagnostics.record({
+        stage: "video",
+        event: "end-of-stream",
+        mediaTime: this.durationValue,
+      })
+    }
+
+    this.notify({ type: "timeupdate", currentTime: this.durationValue })
+    this.notify({ type: "pause" })
+    this.notify({ type: "ended" })
+  }
+
+  private async preparePlayback(
+    fromTime: number,
+    requestId: number
+  ): Promise<PreparedPlayback> {
+    const [audio, video] = await Promise.all([
+      this.prepareAudio(fromTime, requestId),
+      this.prepareVideo(fromTime, requestId),
+    ])
+
+    return { audio, video }
+  }
+
+  private async prepareAudio(
+    fromTime: number,
+    requestId: number
+  ): Promise<PreparedAudio> {
+    if (this.selectedAudioTrack === null) {
+      return { iterator: null, buffers: [], exhausted: true }
+    }
+
+    if (
+      !(await this.ensureAudioSink()) ||
+      !this.isCurrentPlaybackRequest(requestId)
+    ) {
+      return { iterator: null, buffers: [], exhausted: true }
+    }
+
+    const iterator = this.audioSink?.buffers(fromTime)
+
+    if (iterator === undefined) {
+      throw new Error("The selected audio track could not be prepared")
+    }
+
+    this.audioIterator = iterator
+
+    return this.readAudioPreroll(iterator, fromTime, requestId)
+  }
+
+  private async readAudioPreroll(
+    iterator: AsyncGenerator<WrappedAudioBuffer>,
+    fromTime: number,
+    requestId: number
+  ): Promise<PreparedAudio> {
+    const buffers: WrappedAudioBuffer[] = []
+    let exhausted = false
+
+    while (buffers.length < MAX_QUEUED_AUDIO_BUFFERS) {
+      // oxlint-disable-next-line no-await-in-loop -- The sink iterator is ordered, and priming stops at a bounded runway.
+      const result = await iterator.next()
+
+      if (!this.isCurrentPlaybackRequest(requestId)) {
+        return { iterator, buffers, exhausted: true }
+      }
+
+      if (result.done) {
+        exhausted = true
+        break
+      }
+
+      buffers.push(result.value)
+
+      if (
+        result.value.timestamp + result.value.buffer.duration >=
+        fromTime + MIN_AUDIO_PREROLL_SECONDS
+      ) {
+        break
+      }
+    }
+
+    if (buffers.length === MAX_QUEUED_AUDIO_BUFFERS && !exhausted) {
+      this.diagnostics.record({
+        stage: "audio",
+        event: "prime-buffer-limit",
+        mediaTime: fromTime,
+      })
+    }
+
+    return { iterator, buffers, exhausted }
+  }
+
+  private async prepareVideo(
+    fromTime: number,
+    requestId: number
+  ): Promise<PreparedVideo> {
+    const track = this.videoTrack
+
+    if (track === null) {
+      return {
+        iterator: null,
+        firstFrame: null,
+        gap: false,
+      }
+    }
+
+    const sink = await this.dependencies.createCanvasSink(
+      track,
+      CANVAS_POOL_SIZE,
+      true
+    )
+
+    if (!this.isCurrentPlaybackRequest(requestId)) {
+      return {
+        iterator: null,
+        firstFrame: null,
+        gap: false,
+      }
+    }
+
+    const iterator = sink.canvases(
+      Math.max(0, fromTime - VIDEO_LOOKAHEAD_SECONDS)
+    )
+
+    this.canvasIterator = iterator
+
+    return this.readPreparedVideoFrame(iterator, fromTime, requestId)
+  }
+
+  private async readPreparedVideoFrame(
+    iterator: AsyncGenerator<WrappedCanvas>,
+    fromTime: number,
+    requestId: number
+  ): Promise<PreparedVideo> {
+    while (true) {
+      // A frame remains valid over its presentation interval, not just from its timestamp.
+      // oxlint-disable-next-line no-await-in-loop
+      const result = await iterator.next()
+
+      if (!this.isCurrentPlaybackRequest(requestId)) {
+        return { iterator, firstFrame: null, gap: false }
+      }
+
+      if (result.done) {
+        throw new Error(
+          "The video track ended before a frame covered the requested playback time"
+        )
+      }
+
+      const readiness = classifyVideoFrame(
+        result.value,
+        fromTime,
+        this.durationValue
+      )
+
+      switch (readiness.kind) {
+        case "invalid": {
+          throw new Error("The video track returned an invalid frame interval")
+        }
+
+        case "expired": {
+          continue
+        }
+
+        case "after-end": {
+          throw new Error(
+            "The video track has no frame before the end of the media"
+          )
+        }
+
+        case "covering":
+        case "gap": {
+          // A future frame confirms a real presentation gap. Keep it queued so
+          // the renderer waits until its timestamp instead of showing it early.
+          return {
+            iterator,
+            firstFrame: readiness.frame,
+            gap: readiness.kind === "gap",
+          }
+        }
+      }
+    }
+  }
+
+  private isCurrentPlaybackRequest(requestId: number): boolean {
+    return (
+      !this.disposed && this.playPending && requestId === this.playbackRequestId
+    )
+  }
+
+  private createPlaybackCancellation(requestId: number): PlaybackCancellation {
+    const signal = createCancellationSignal()
+    const cancellation = { requestId, ...signal }
+
+    this.playbackCancellation = cancellation
+
+    return cancellation
+  }
+
+  private clearPlaybackCancellation(requestId: number): void {
+    if (this.playbackCancellation?.requestId === requestId) {
+      this.playbackCancellation = null
+    }
+  }
+
+  private cancelPendingPlayback(): void {
+    const cancellation = this.playbackCancellation
+
+    this.playbackCancellation = null
+    cancellation?.cancel()
   }
 
   // A run failure that escapes to here is real (mediabunny retries transient
@@ -713,28 +1523,45 @@ export class MediabunnyEngine {
         return
       }
 
+      this.haltPlaybackForFailure()
       this.fail(
         error instanceof Error ? error.message : String(error),
         MEDIA_ERR_DECODE
       )
+      this.diagnostics.record({
+        stage: "audio",
+        event: "failed",
+        errorCode: MEDIA_ERR_DECODE,
+      })
     }
   }
 
   private async runVideoTask(
     task: Promise<void>,
-    generation: number
+    generation: number,
+    videoGeneration: number
   ): Promise<void> {
     try {
       await task
     } catch (error) {
-      if (this.disposed || generation !== this.generation) {
+      if (
+        this.disposed ||
+        generation !== this.generation ||
+        videoGeneration !== this.videoGeneration
+      ) {
         return
       }
 
+      this.haltPlaybackForFailure()
       this.fail(
         error instanceof Error ? error.message : String(error),
         MEDIA_ERR_DECODE
       )
+      this.diagnostics.record({
+        stage: "video",
+        event: "failed",
+        errorCode: MEDIA_ERR_DECODE,
+      })
     }
   }
 
@@ -743,11 +1570,21 @@ export class MediabunnyEngine {
     this.stopVideoLoop()
   }
 
+  private haltPlaybackForFailure(): void {
+    this.frozenMediaTime = this.currentMediaTime()
+    this.playing = false
+    this.playPending = false
+    this.buffering = false
+    this.stopPlayback()
+    this.notify({ type: "pause" })
+  }
+
   private stopAudio(): void {
     this.audioGeneration += 1
     this.audioFeedExhausted = false
     this.audioRunPrimed = false
     this.lastScheduledAudioEnd = 0
+    this.pendingAudioBuffers = []
 
     const { activeAudioNodes } = this
     this.activeAudioNodes = []
@@ -769,8 +1606,10 @@ export class MediabunnyEngine {
   }
 
   private stopVideoLoop(): void {
+    this.videoGeneration += 1
     this.frameQueue = []
     this.pullingFrame = false
+    this.videoTick = null
 
     if (this.renderFrame !== null) {
       cancelAnimationFrame(this.renderFrame)
@@ -780,7 +1619,6 @@ export class MediabunnyEngine {
     const iterator = this.canvasIterator
 
     this.canvasIterator = null
-    this.canvasSink = null
 
     if (iterator !== null) {
       void iterator.return(undefined).catch(() => {
@@ -789,7 +1627,10 @@ export class MediabunnyEngine {
     }
   }
 
-  private async startAudio(fromTime: number): Promise<void> {
+  private async startAudio(
+    fromTime: number,
+    preparedIterator?: AsyncGenerator<WrappedAudioBuffer>
+  ): Promise<void> {
     const { generation } = this
     const { audioGeneration } = this
 
@@ -806,7 +1647,7 @@ export class MediabunnyEngine {
       return
     }
 
-    const iterator = this.audioSink?.buffers(fromTime)
+    const iterator = preparedIterator ?? this.audioSink?.buffers(fromTime)
 
     if (iterator === undefined) {
       return
@@ -814,28 +1655,32 @@ export class MediabunnyEngine {
 
     this.audioIterator = iterator
     this.audioFeedExhausted = false
-    await this.consumeAudio(iterator, generation, audioGeneration)
+    await this.consumeAudio(iterator, { generation, audioGeneration })
   }
 
   private async consumeAudio(
     iterator: AsyncGenerator<WrappedAudioBuffer>,
-    generation: number,
-    audioGeneration: number
+    run: AudioRunToken
   ): Promise<void> {
     try {
       for await (const wrapped of iterator) {
-        if (!this.isCurrentAudioRun(generation, audioGeneration)) {
+        if (!this.isCurrentAudioRun(run.generation, run.audioGeneration)) {
           return
         }
 
         this.scheduleAudioBuffer(wrapped.buffer, wrapped.timestamp)
 
-        if (!(await this.waitForAudioCapacity(generation, audioGeneration))) {
+        if (
+          !(await this.waitForAudioCapacity(
+            run.generation,
+            run.audioGeneration
+          ))
+        ) {
           return
         }
       }
 
-      this.finishIfAudioFeedExhausted(generation, audioGeneration)
+      this.finishIfAudioFeedExhausted(run.generation, run.audioGeneration)
     } finally {
       if (this.audioIterator === iterator) {
         this.audioIterator = null
@@ -885,9 +1730,7 @@ export class MediabunnyEngine {
     }
 
     if (this.audioSink === null) {
-      const { AudioBufferSink: Sink } = await import("mediabunny")
-
-      this.audioSink = new Sink(track)
+      this.audioSink = await this.dependencies.createAudioSink(track)
     }
 
     return !this.disposed && generation === this.generation
@@ -902,6 +1745,11 @@ export class MediabunnyEngine {
     }
 
     this.audioFeedExhausted = true
+
+    if (this.buffering) {
+      this.resumeAudioBuffering(true)
+    }
+
     this.finishIfPlaybackTimeReachedEnd(this.currentMediaTime())
   }
 
@@ -934,17 +1782,131 @@ export class MediabunnyEngine {
       return
     }
 
-    // The first buffer of a run re-anchors the clock to real audio: after a
-    // seek or track switch the feed takes a moment to produce anything, the
-    // context clock kept running, and pre-computed schedule times are
-    // already in the past. Following the audio (rather than clamping it to
-    // "now") is what keeps the clock honest and prevents a backlog of
-    // buffers from stacking on one instant.
-    if (!this.audioRunPrimed) {
-      this.audioRunPrimed = true
-      this.reanchor(timestamp)
+    if (this.hasAudioRunUnderrun(context)) {
+      this.enterAudioBuffering()
     }
 
+    if (this.buffering) {
+      this.pendingAudioBuffers.push({ buffer, timestamp })
+
+      if (
+        this.pendingAudioBuffers.length >= MAX_QUEUED_AUDIO_BUFFERS ||
+        this.audioCoverageEnd() >=
+          this.frozenMediaTime + MIN_AUDIO_PREROLL_SECONDS
+      ) {
+        this.resumeAudioBuffering(false)
+      }
+
+      return
+    }
+
+    const schedule = this.calculateAudioBufferSchedule(
+      buffer,
+      timestamp,
+      context
+    )
+
+    if (schedule === null) {
+      return
+    }
+
+    this.recordAudioBufferTrim(timestamp, schedule.sourceOffset)
+    this.scheduleAudioNode({ buffer, timestamp, gain, ...schedule })
+  }
+
+  private audioCoverageEnd(): number {
+    let coveredUntil = this.frozenMediaTime
+
+    for (const wrapped of this.pendingAudioBuffers) {
+      const bufferEnd = wrapped.timestamp + wrapped.buffer.duration
+      const startsBeforeGap = wrapped.timestamp <= coveredUntil + 0.05
+
+      if (startsBeforeGap && bufferEnd > coveredUntil) {
+        coveredUntil = bufferEnd
+      }
+    }
+
+    return coveredUntil
+  }
+
+  private resumeAudioBuffering(force: boolean): void {
+    if (!this.buffering || (!force && this.pendingAudioBuffers.length === 0)) {
+      return
+    }
+
+    const buffers = this.pendingAudioBuffers
+    this.pendingAudioBuffers = []
+    this.buffering = false
+    this.lastScheduledAudioEnd = 0
+    this.reanchor(this.frozenMediaTime)
+
+    for (const wrapped of buffers) {
+      this.scheduleAudioBuffer(wrapped.buffer, wrapped.timestamp)
+    }
+
+    this.diagnostics.record({
+      stage: "audio",
+      event: "underrun-recovered",
+      mediaTime: this.frozenMediaTime,
+    })
+    this.notify({ type: "playing" })
+
+    if (this.videoTick !== null && this.renderFrame === null) {
+      this.renderFrame = requestAnimationFrame(this.videoTick)
+    }
+  }
+
+  private enterAudioBuffering(): void {
+    const context = this.audioContext
+
+    if (context === null || this.buffering) {
+      return
+    }
+
+    const currentTime = this.currentMediaTime()
+
+    const audioEndTime =
+      this.lastScheduledAudioEnd > 0
+        ? this.anchorMediaTime +
+          (this.lastScheduledAudioEnd - this.anchorContextTime) * this.rateValue
+        : currentTime
+
+    this.frozenMediaTime = Math.max(0, Math.min(currentTime, audioEndTime))
+    this.buffering = true
+    this.lastScheduledAudioEnd = 0
+    this.reanchor(this.frozenMediaTime)
+
+    if (this.renderFrame !== null) {
+      cancelAnimationFrame(this.renderFrame)
+      this.renderFrame = null
+    }
+
+    this.diagnostics.record({
+      stage: "audio",
+      event: "underrun",
+      mediaTime: this.frozenMediaTime,
+    })
+    this.notify({ type: "timeupdate", currentTime: this.frozenMediaTime })
+    this.notify({ type: "waiting" })
+  }
+
+  private hasAudioRunUnderrun(context: AudioContext): boolean {
+    return (
+      this.playing &&
+      !this.buffering &&
+      this.selectedAudioTrack !== null &&
+      !this.audioFeedExhausted &&
+      this.audioRunPrimed &&
+      this.lastScheduledAudioEnd > 0 &&
+      this.lastScheduledAudioEnd <= context.currentTime
+    )
+  }
+
+  private calculateAudioBufferSchedule(
+    buffer: AudioBuffer,
+    timestamp: number,
+    context: AudioContext
+  ): AudioBufferSchedule | null {
     const when =
       this.anchorContextTime +
       (timestamp - this.anchorMediaTime) / this.rateValue
@@ -952,6 +1914,45 @@ export class MediabunnyEngine {
     // Wholly stale buffers (an interruption longer than this buffer)
     // are dropped, not clamped: playing them now would be a garbled burst.
     if (when + buffer.duration / this.rateValue <= context.currentTime) {
+      return null
+    }
+
+    const startAt = Math.max(
+      when,
+      context.currentTime,
+      this.lastScheduledAudioEnd
+    )
+
+    const sourceOffset = Math.max(0, (startAt - when) * this.rateValue)
+
+    if (sourceOffset >= buffer.duration) {
+      return null
+    }
+
+    return { startAt, sourceOffset }
+  }
+
+  private recordAudioBufferTrim(timestamp: number, sourceOffset: number): void {
+    if (sourceOffset > 0) {
+      this.diagnostics.record({
+        stage: "audio",
+        event: "buffer-trimmed",
+        mediaTime: timestamp + sourceOffset,
+        playbackRate: this.rateValue,
+      })
+    }
+  }
+
+  private scheduleAudioNode({
+    buffer,
+    timestamp,
+    gain,
+    startAt,
+    sourceOffset,
+  }: AudioNodeSchedule): void {
+    const context = this.audioContext
+
+    if (context === null) {
       return
     }
 
@@ -960,19 +1961,43 @@ export class MediabunnyEngine {
     node.playbackRate.value = this.rateValue
     node.connect(gain)
 
-    const startAt = Math.max(
-      when,
-      context.currentTime,
-      this.lastScheduledAudioEnd
-    )
-
-    this.lastScheduledAudioEnd = startAt + buffer.duration / this.rateValue
+    this.lastScheduledAudioEnd =
+      startAt + (buffer.duration - sourceOffset) / this.rateValue
 
     this.activeAudioNodes.push({
       node,
       ended: this.trackAudioNodeEnd(node),
+      buffer,
+      timestamp,
     })
-    node.start(startAt)
+
+    if (sourceOffset > 0) {
+      node.start(startAt, sourceOffset)
+    } else {
+      node.start(startAt)
+    }
+  }
+
+  private rescheduleAudioQueue(): void {
+    const queuedBuffers = this.activeAudioNodes.map(
+      ({ buffer, timestamp }) => ({
+        buffer,
+        timestamp,
+      })
+    )
+
+    const oldNodes = this.activeAudioNodes
+    this.activeAudioNodes = []
+    this.lastScheduledAudioEnd = 0
+
+    for (const { node } of oldNodes) {
+      node.stop()
+      node.disconnect()
+    }
+
+    for (const { buffer, timestamp } of queuedBuffers) {
+      this.scheduleAudioBuffer(buffer, timestamp)
+    }
   }
 
   // Resolves when the node finishes and removes it from the capacity ledger.
@@ -991,38 +2016,56 @@ export class MediabunnyEngine {
     })
   }
 
-  private async startVideoLoop(): Promise<void> {
+  private async startVideoLoop(prepared: PreparedVideo): Promise<void> {
     const track = this.videoTrack
     const { generation } = this
+    const { videoGeneration } = this
 
-    if (track !== null) {
-      const { CanvasSink } = await import("mediabunny")
-
-      if (this.disposed || generation !== this.generation || !this.playing) {
-        return
-      }
-
-      this.canvasSink = new CanvasSink(track, {
-        poolSize: CANVAS_POOL_SIZE,
-        decoderOptions: { hardwareAcceleration: "prefer-hardware" },
-      })
-
-      this.canvasIterator = this.canvasSink.canvases(
-        this.currentMediaTime() - VIDEO_LOOKAHEAD_SECONDS
-      )
+    if (track !== null && prepared.iterator !== null) {
+      this.canvasIterator = prepared.iterator
       this.lastBlittedTimestamp = -1
+
+      if (prepared.firstFrame !== null) {
+        this.frameQueue.push({
+          canvas: prepared.firstFrame.canvas,
+          timestamp: prepared.firstFrame.timestamp,
+        })
+      }
     }
 
-    if (this.disposed || generation !== this.generation || !this.playing) {
+    if (
+      this.disposed ||
+      generation !== this.generation ||
+      videoGeneration !== this.videoGeneration ||
+      !this.playing
+    ) {
       return
     }
 
     const tick = () => {
-      if (this.disposed || generation !== this.generation || !this.playing) {
+      if (
+        this.disposed ||
+        generation !== this.generation ||
+        videoGeneration !== this.videoGeneration ||
+        !this.playing
+      ) {
         return
       }
 
       const now = Math.min(this.currentMediaTime(), this.durationValue)
+
+      if (
+        this.audioContext !== null &&
+        this.hasAudioRunUnderrun(this.audioContext)
+      ) {
+        this.enterAudioBuffering()
+
+        return
+      }
+
+      if (this.buffering) {
+        return
+      }
 
       if (this.finishIfPlaybackTimeReachedEnd(now)) {
         return
@@ -1030,13 +2073,15 @@ export class MediabunnyEngine {
 
       if (track !== null) {
         this.blitDueFrames(now)
-        void this.pullFramesUpTo(now + VIDEO_LOOKAHEAD_SECONDS)
+        void this.pullFramesUpTo(now + VIDEO_LOOKAHEAD_SECONDS, videoGeneration)
       }
 
       this.emitTimeupdate(now)
       this.renderFrame = requestAnimationFrame(tick)
     }
 
+    this.videoTick = tick
+    this.blitDueFrames(this.currentMediaTime())
     this.renderFrame = requestAnimationFrame(tick)
   }
 
@@ -1054,7 +2099,10 @@ export class MediabunnyEngine {
     }
   }
 
-  private async pullFramesUpTo(horizon: number): Promise<void> {
+  private async pullFramesUpTo(
+    horizon: number,
+    videoGeneration: number
+  ): Promise<void> {
     if (this.pullingFrame || this.canvasIterator === null) {
       return
     }
@@ -1077,9 +2125,15 @@ export class MediabunnyEngine {
     try {
       result = await iterator.next()
     } catch (error) {
-      this.pullingFrame = false
+      if (videoGeneration === this.videoGeneration) {
+        this.pullingFrame = false
+      }
 
-      if (!this.disposed && generation === this.generation) {
+      if (
+        !this.disposed &&
+        generation === this.generation &&
+        videoGeneration === this.videoGeneration
+      ) {
         this.fail(
           error instanceof Error ? error.message : String(error),
           MEDIA_ERR_DECODE
@@ -1089,19 +2143,21 @@ export class MediabunnyEngine {
       return
     }
 
-    this.pullingFrame = false
-    this.acceptPulledFrame(result, iterator, generation)
+    if (videoGeneration === this.videoGeneration) {
+      this.pullingFrame = false
+      this.acceptPulledFrame(result, iterator, videoGeneration)
+    }
   }
 
   private acceptPulledFrame(
     result: IteratorResult<WrappedCanvas>,
     iterator: AsyncGenerator<WrappedCanvas>,
-    generation: number
+    videoGeneration: number
   ): void {
     if (
       result.done ||
       this.disposed ||
-      generation !== this.generation ||
+      videoGeneration !== this.videoGeneration ||
       this.canvasIterator !== iterator
     ) {
       return
@@ -1109,12 +2165,10 @@ export class MediabunnyEngine {
 
     const { canvas } = result.value
 
-    if (canvas instanceof HTMLCanvasElement) {
-      this.frameQueue.push({ canvas, timestamp: result.value.timestamp })
-    }
+    this.frameQueue.push({ canvas, timestamp: result.value.timestamp })
   }
 
-  private blit(canvas: HTMLCanvasElement): void {
+  private blit(canvas: HTMLCanvasElement | OffscreenCanvas): void {
     const target = this.displayCanvas
 
     if (target === null) {

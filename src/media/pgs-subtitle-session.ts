@@ -1,6 +1,7 @@
-import type {
-  MatroskaPgsPacket,
-  MatroskaPgsWindowEvent,
+import {
+  MatroskaSubtitleError,
+  type MatroskaPgsPacket,
+  type MatroskaPgsWindowEvent,
 } from "./matroska-subtitles"
 import { PGS_LIMITS } from "./pgs-subtitles"
 
@@ -99,6 +100,10 @@ const PGS_WINDOW_PREFETCH_LEAD_SECONDS = 30
 
 const MAX_PGS_WINDOW_FORWARD_SECONDS = 120
 
+const MAX_PGS_WINDOW_ATTEMPTS_PER_FAILURE = 3
+
+const PGS_WINDOW_RETRY_BASE_MS = 1_000
+
 function postToWorker(
   worker: Worker,
   message: WorkerRequest,
@@ -135,11 +140,13 @@ export class PgsSubtitleSession {
   private prefetchController: AbortController | null = null
   private prefetchedWindow: PgsSubtitleWindow | null = null
   private attemptedPrefetchTarget: number | null = null
-  private failedWindowTarget: number | null = null
+  private failedWindowAttempts = 0
+  private nextWindowRetryAt = 0
+  private windowRetryExhausted = false
   private windowSequence = 0
   private applyingWindow = false
 
-  constructor() {
+  constructor(private readonly now: () => number = () => performance.now()) {
     this.ready = new Promise((resolve, reject) => {
       this.readyResolve = resolve
       this.readyReject = reject
@@ -179,6 +186,38 @@ export class PgsSubtitleSession {
 
   setWindowLoader(loader: PgsWindowLoader): void {
     this.windowLoader = loader
+  }
+
+  retryWindow(): void {
+    if (
+      this.latestTime === null ||
+      this.windowLoader === null ||
+      this.disposed ||
+      this.failedValue
+    ) {
+      return
+    }
+
+    if (!this.upstreamAllowsWindowRequest()) {
+      return
+    }
+
+    this.failedWindowAttempts = 0
+    this.nextWindowRetryAt = 0
+    this.windowRetryExhausted = false
+
+    if (
+      this.currentWindow !== null &&
+      this.latestTime >= this.currentWindow.start &&
+      this.latestTime <= this.currentWindow.end
+    ) {
+      this.attemptedPrefetchTarget = null
+      this.startWindowPrefetch(this.currentWindow.end)
+
+      return
+    }
+
+    this.ensureWindowForTime(this.latestTime)
   }
 
   invalidatePendingRender(): void {
@@ -256,8 +295,6 @@ export class PgsSubtitleSession {
         time >= this.currentWindow.start &&
         time <= this.currentWindow.end
       ) {
-        this.failedWindowTarget = null
-
         if (
           this.currentWindow.end - time <= PGS_WINDOW_PREFETCH_LEAD_SECONDS &&
           this.currentWindow.end > time + 0.5
@@ -509,7 +546,7 @@ export class PgsSubtitleSession {
       return
     }
 
-    if (this.hasWindowRequestFor(time) || this.matchesFailedWindow(time)) {
+    if (this.hasWindowRequestFor(time) || !this.canRetryWindow()) {
       return
     }
 
@@ -562,11 +599,44 @@ export class PgsSubtitleSession {
     )
   }
 
-  private matchesFailedWindow(time: number): boolean {
-    return (
-      this.failedWindowTarget !== null &&
-      Math.abs(time - this.failedWindowTarget) <= 1
-    )
+  private canRetryWindow(): boolean {
+    return !this.windowRetryExhausted && this.upstreamAllowsWindowRequest()
+  }
+
+  private upstreamAllowsWindowRequest(): boolean {
+    return this.now() >= this.nextWindowRetryAt
+  }
+
+  private recordWindowFailure(error: MatroskaSubtitleError | null): void {
+    this.failedWindowAttempts += 1
+
+    const retryable =
+      error !== null &&
+      (error.kind === "unreachable" ||
+        error.kind === "timeout" ||
+        error.kind === "deadline" ||
+        (error.kind === "http" &&
+          (error.status === 408 ||
+            error.status === 425 ||
+            error.status === 429 ||
+            (error.status !== null && error.status >= 500))))
+
+    if (!retryable) {
+      this.windowRetryExhausted = true
+
+      return
+    }
+
+    const backoffMs =
+      PGS_WINDOW_RETRY_BASE_MS * 2 ** (this.failedWindowAttempts - 1)
+
+    const { retryAfterMs } = error
+
+    this.nextWindowRetryAt = this.now() + Math.max(backoffMs, retryAfterMs ?? 0)
+
+    if (this.failedWindowAttempts >= MAX_PGS_WINDOW_ATTEMPTS_PER_FAILURE) {
+      this.windowRetryExhausted = true
+    }
   }
 
   private beginWindowActivation(window: PgsSubtitleWindow, time: number): void {
@@ -609,14 +679,16 @@ export class PgsSubtitleSession {
 
         await this.activateWindow(window, controller.signal, sequence)
       })
-      .catch(() => {
+      .catch((error) => {
         if (controller.signal.aborted || this.disposed) {
           return
         }
 
         this.activeWindowController = null
         this.activeWindowTarget = null
-        this.failedWindowTarget = time
+        this.recordWindowFailure(
+          error instanceof MatroskaSubtitleError ? error : null
+        )
         this.notifyListeners({ kind: "unavailable" })
       })
       .finally(() => this.clearActiveWindow(controller))
@@ -643,6 +715,7 @@ export class PgsSubtitleSession {
       this.windowLoader === null ||
       this.disposed ||
       this.failedValue ||
+      !this.canRetryWindow() ||
       this.prefetchController !== null ||
       this.prefetchedWindow !== null ||
       this.attemptedPrefetchTarget === targetTime
@@ -668,9 +741,13 @@ export class PgsSubtitleSession {
         this.prefetchedWindow = window
         this.prefetchController = null
       })
-      .catch(() => {
+      .catch((error) => {
         if (!controller.signal.aborted && !this.disposed) {
-          // Prefetch is opportunistic; an edge-triggered load reports failures to the player.
+          this.recordWindowFailure(
+            error instanceof MatroskaSubtitleError ? error : null
+          )
+
+          // Keep current coverage active; the next boundary read shares this backoff.
           this.prefetchController = null
         }
       })
@@ -774,9 +851,11 @@ export class PgsSubtitleSession {
       }
 
       this.markWindowActive(window)
-    } catch {
+    } catch (error: unknown) {
       if (!signal.aborted && !this.disposed) {
-        this.failedWindowTarget = this.latestTime
+        this.recordWindowFailure(
+          error instanceof MatroskaSubtitleError ? error : null
+        )
         this.notifyListeners({ kind: "unavailable" })
       }
     } finally {
@@ -791,7 +870,9 @@ export class PgsSubtitleSession {
       start: Math.min(window.boundaryTime, window.requestTime),
       end: window.coverageTime,
     }
-    this.failedWindowTarget = null
+    this.failedWindowAttempts = 0
+    this.nextWindowRetryAt = 0
+    this.windowRetryExhausted = false
     this.attemptedPrefetchTarget = null
 
     if (this.latestTime !== null) {

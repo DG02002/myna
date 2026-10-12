@@ -5,6 +5,7 @@
 // track URL needs CORS headers plus a `crossOrigin` attribute, and that
 // attribute is banned here because it breaks native cross-origin playback.
 import { proxiedMediaUrl } from "./proxy/proxied-url"
+import { parseRetryAfterMs } from "./retry-after"
 
 export interface SubtitleCue {
   startTime: number
@@ -54,7 +55,15 @@ export interface SubtitleTrackName {
   language: string
 }
 
-type SubtitleLoadFailure = { kind: "unreachable" } | { kind: "invalid" }
+type SubtitleLoadFailure =
+  | { kind: "unreachable" }
+  | { kind: "invalid" }
+  | { kind: "http"; status: number; retryAfterMs: number | null }
+
+type SubtitleTextFetchResult =
+  | { text: string }
+  | { failure: SubtitleLoadFailure }
+  | { aborted: true }
 
 export type SubtitleLoadResult =
   | { cues: SubtitleCue[] }
@@ -210,8 +219,7 @@ export function subtitleTrackName(
 }
 
 // One fetch attempt with a deadline, a size bound, and a cancellation path
-// chained to the caller's signal. Returns null for anything that is not an
-// OK response body under the size bound.
+// chained to the caller's signal.
 async function fetchSubtitleTextOnce(
   url: string,
   signal: AbortSignal,
@@ -219,9 +227,9 @@ async function fetchSubtitleTextOnce(
     loadedBytes: number
     totalBytes: number | null
   }) => void
-): Promise<string | null> {
+): Promise<SubtitleTextFetchResult> {
   if (signal.aborted) {
-    return null
+    return { aborted: true }
   }
 
   const controller = new AbortController()
@@ -237,31 +245,64 @@ async function fetchSubtitleTextOnce(
 
   try {
     const response = await fetch(url, { signal: controller.signal })
-    const length = Number(response.headers.get("content-length"))
 
-    if (
-      !response.ok ||
-      (Number.isFinite(length) && length > MAX_SUBTITLE_BYTES)
-    ) {
-      controller.abort()
-
-      return null
-    }
-
-    if (response.body === null) {
-      return null
-    }
-
-    const totalBytes = Number.isFinite(length) && length > 0 ? length : null
-
-    return await readBodyText(response.body, controller, (loadedBytes) => {
-      onProgress?.({ loadedBytes, totalBytes })
-    })
+    return await readSubtitleResponse(response, controller, onProgress)
   } catch {
-    return null
+    return signal.aborted
+      ? { aborted: true }
+      : { failure: { kind: "unreachable" } }
   } finally {
     clearTimeout(deadline)
     signal.removeEventListener("abort", abortFromCaller)
+  }
+}
+
+async function readSubtitleResponse(
+  response: Response,
+  controller: AbortController,
+  onProgress?: (progress: {
+    loadedBytes: number
+    totalBytes: number | null
+  }) => void
+): Promise<SubtitleTextFetchResult> {
+  const length = Number(response.headers.get("content-length"))
+
+  if (!response.ok) {
+    await cancelSubtitleResponse(response)
+
+    return {
+      failure: {
+        kind: "http",
+        status: response.status,
+        retryAfterMs: parseRetryAfterMs(response.headers.get("Retry-After")),
+      },
+    }
+  }
+
+  if (Number.isFinite(length) && length > MAX_SUBTITLE_BYTES) {
+    await cancelSubtitleResponse(response)
+
+    return { failure: { kind: "invalid" } }
+  }
+
+  if (response.body === null) {
+    return { failure: { kind: "invalid" } }
+  }
+
+  const totalBytes = Number.isFinite(length) && length > 0 ? length : null
+
+  const text = await readBodyText(response.body, controller, (loadedBytes) => {
+    onProgress?.({ loadedBytes, totalBytes })
+  })
+
+  return text === null ? { failure: { kind: "invalid" } } : { text }
+}
+
+async function cancelSubtitleResponse(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel()
+  } catch {
+    // Preserve the already-readable status or size failure if cancel rejects.
   }
 }
 
@@ -321,22 +362,36 @@ export async function loadSubtitleCues(
 ): Promise<SubtitleLoadResult> {
   // Direct first; the same-origin proxy only when the origin blocks
   // cross-origin reads (the same fallback order the advanced engine uses).
-  const directText = await fetchSubtitleTextOnce(url, signal, onProgress)
+  const directResult = await fetchSubtitleTextOnce(url, signal, onProgress)
 
-  if (signal.aborted) {
+  if (signal.aborted || "aborted" in directResult) {
     return { aborted: true }
   }
 
-  const text =
-    directText ??
-    (await fetchSubtitleTextOnce(proxiedMediaUrl(url), signal, onProgress))
+  let text: string
 
-  if (signal.aborted) {
-    return { aborted: true }
-  }
+  if ("text" in directResult) {
+    const { text: directText } = directResult
+    text = directText
+  } else if (directResult.failure.kind !== "unreachable") {
+    return directResult
+  } else {
+    const proxyResult = await fetchSubtitleTextOnce(
+      proxiedMediaUrl(url),
+      signal,
+      onProgress
+    )
 
-  if (text === null) {
-    return { failure: { kind: "unreachable" } }
+    if (signal.aborted || "aborted" in proxyResult) {
+      return { aborted: true }
+    }
+
+    if ("failure" in proxyResult) {
+      return proxyResult
+    }
+
+    const { text: proxyText } = proxyResult
+    text = proxyText
   }
 
   const cues = parseSubtitleCues(text)

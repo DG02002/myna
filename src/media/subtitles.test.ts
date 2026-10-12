@@ -122,6 +122,33 @@ void test("retries a CORS-blocked subtitle through the media proxy", async () =>
   }
 })
 
+void test("preserves a readable throttling response without proxy retry", async () => {
+  const originalFetch = globalThis.fetch
+  const requests: string[] = []
+  globalThis.fetch = async (input) => {
+    requests.push(inputUrl(input))
+
+    return new Response(null, {
+      status: 429,
+      headers: { "Retry-After": "60" },
+    })
+  }
+
+  try {
+    const result = await loadSubtitleCues(
+      "https://media.example/subtitles.vtt",
+      new AbortController().signal
+    )
+
+    assert.deepEqual(requests, ["https://media.example/subtitles.vtt"])
+    assert.deepEqual(result, {
+      failure: { kind: "http", status: 429, retryAfterMs: 60_000 },
+    })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 void test("does not start a proxy fetch after cancellation", async () => {
   const originalFetch = globalThis.fetch
   const controller = new AbortController()

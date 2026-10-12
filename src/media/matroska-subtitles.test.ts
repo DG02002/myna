@@ -1167,10 +1167,51 @@ void test("stops on truncated input and servers that ignore Range", async () => 
       "https://media.example/ignores-range.mkv",
       ignoresRange
     ).probe(new AbortController().signal),
-    /unsupported/
+    /invalid/
   )
-  assert.equal(requests.length, 2)
+  assert.equal(requests.length, 1)
   assert.ok(requests.every((request) => request.header.startsWith("bytes=")))
+})
+
+void test("does not retry a readable throttling response through the proxy", async () => {
+  const requests: RecordedRange[] = []
+
+  const fetcher: typeof fetch = async (input, init) => {
+    requests.push({
+      url: inputUrl(input),
+      header: new Headers(init?.headers).get("range") ?? "",
+      bytes: 0,
+    })
+
+    return new Response(null, {
+      status: 429,
+      headers: { "Retry-After": "60" },
+    })
+  }
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/throttled.mkv",
+    fetcher
+  )
+
+  let failure: MatroskaSubtitleError | null = null
+
+  try {
+    await reader.probe(new AbortController().signal)
+  } catch (error: unknown) {
+    if (!(error instanceof MatroskaSubtitleError)) {
+      throw error
+    }
+
+    failure = error
+  }
+
+  assert.ok(failure instanceof MatroskaSubtitleError)
+  assert.equal(failure.kind, "http")
+  assert.equal(failure.status, 429)
+  assert.equal(failure.retryAfterMs, 60_000)
+  assert.equal(requests.length, 1)
+  assert.ok(requests[0]?.url.startsWith("https://"))
 })
 
 void test("falls back to proxy byte ranges when direct CORS reads fail", async () => {
@@ -1326,7 +1367,7 @@ void test("recovers one dropped proxy range without retrying malformed responses
       "https://media.example/movie.mkv",
       malformed
     ).probe(new AbortController().signal),
-    /unsupported/
+    /invalid/
   )
   assert.equal(invalidAttempts, 1)
 })

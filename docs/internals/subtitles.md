@@ -18,11 +18,13 @@ stays on the native `<video>` while a client reader requests only EBML metadata
 and the selected subtitle blocks. It prefers Matroska Cues; files without
 usable subtitle Cues get only a bounded cluster scan. Every read requires a
 valid `206` response with a matching `Content-Range`. The direct URL is tried
-first, and the media proxy is used only for these byte-range reads when direct
-fetching fails. Reads, deadlines, cue count, subtitle text, and retained range
-pages are capped. Source changes and track changes abort pending reads. A
-subtitle failure stays in subtitle status and never interrupts playback; URLs
-are not written to logs.
+first. A readable HTTP error or malformed range response is surfaced directly;
+it does not trigger a duplicate request through the proxy. The media proxy is
+used for these byte-range reads only when the browser cannot access the direct
+read. HTTP status and `Retry-After` are retained for recovery decisions. Reads,
+deadlines, cue count, subtitle text, and retained range pages are capped.
+Source changes and track changes abort pending reads. A subtitle failure stays
+in subtitle status and never interrupts playback; URLs are not written to logs.
 
 Subtitle range fetches bypass the browser HTTP cache with `cache: "no-store"`.
 Chromium otherwise serializes concurrent ranges to the same URL behind a cache
@@ -144,7 +146,10 @@ loaded only when a PGS track is selected. The libbitsub license is served from
 
 AkariSub runs libass in a Web Worker on a player-owned canvas that reserves
 space for visible controls. Both engines drive its clock explicitly: native
-video supplies its media time and Mediabunny supplies its audio-context time.
+video supplies its media time and Mediabunny supplies its audio-context time,
+clamped to scheduled audio coverage while audio is active. Mediabunny waits for
+decoded startup data and freezes subtitles with the presentation clock during
+audio underruns.
 Do not use AkariSub's video-managed frame clock with signed cross-origin media;
 it constructs a `VideoFrame`, which fails on tainted native video. Pass copies
 of headers, packets, and fonts because AkariSub transfers their buffers to the

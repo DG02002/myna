@@ -1,5 +1,6 @@
 import { PgsDisplaySetInspector, type PgsDisplaySet } from "./pgs-subtitles"
 import { proxiedMediaUrl } from "./proxy/proxied-url"
+import { parseRetryAfterMs } from "./retry-after"
 import type { SubtitleCue, SubtitleTrackFlags } from "./subtitles"
 
 // Parsing ranges is deliberately sequential: each next EBML offset depends on
@@ -163,31 +164,44 @@ interface PgsPacketStreamRequest {
 export type MatroskaSubtitleFailureKind =
   | "aborted"
   | "deadline"
+  | "http"
   | "invalid"
   | "limit"
   | "unsupported"
   | "unreachable"
   | "timeout"
 
-function subtitleErrorMessage(kind: MatroskaSubtitleFailureKind): string {
+function subtitleErrorMessage(
+  kind: MatroskaSubtitleFailureKind,
+  status: number | null
+): string {
   switch (kind) {
     case "deadline":
       return "Embedded subtitle extraction timed out."
     case "timeout":
       return "Embedded subtitle range request timed out."
+    case "http":
+      return `Subtitle server returned HTTP ${status ?? "an error"}.`
     default:
       return `Embedded subtitles are ${kind}.`
   }
 }
 
 export class MatroskaSubtitleError extends Error {
+  readonly status: number | null
+  readonly retryAfterMs: number | null
+
   constructor(
     readonly kind: MatroskaSubtitleFailureKind,
-    readonly coverageTime?: number
+    readonly coverageTime?: number,
+    details: { status?: number; retryAfterMs?: number | null } = {}
   ) {
-    super(subtitleErrorMessage(kind))
+    const status = details.status ?? null
+    super(subtitleErrorMessage(kind, status))
 
     this.name = "MatroskaSubtitleError"
+    this.status = status
+    this.retryAfterMs = details.retryAfterMs ?? null
   }
 }
 
@@ -2100,6 +2114,14 @@ class RangeReader {
           : new MatroskaSubtitleError("unreachable")
       }
 
+      if (
+        error instanceof MatroskaSubtitleError &&
+        error.kind !== "timeout" &&
+        error.kind !== "unreachable"
+      ) {
+        throw error
+      }
+
       this.readMode = "proxy"
       this.reservePage(start, end)
 
@@ -2213,7 +2235,15 @@ async function readRangeHeaders(
 ): Promise<{ totalSize: number; length: number }> {
   if (response.status !== 206) {
     await cancelBody(response)
-    throw new MatroskaSubtitleError("unsupported")
+
+    if (response.status >= 400) {
+      throw new MatroskaSubtitleError("http", undefined, {
+        status: response.status,
+        retryAfterMs: parseRetryAfterMs(response.headers.get("Retry-After")),
+      })
+    }
+
+    throw new MatroskaSubtitleError("invalid")
   }
 
   const match = /^bytes (\d+)-(\d+)\/(\d+)$/i.exec(

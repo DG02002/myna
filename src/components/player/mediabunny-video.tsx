@@ -9,6 +9,7 @@ import {
 
 export interface MediabunnyVideoProps {
   init: EngineInit
+  createEngine?: (init: EngineInit) => MediabunnyEngine
   onEngine: (engine: MediabunnyEngine) => void
   onAdapter: (adapter: MediabunnyMediaAdapter | null) => void
   onSelectedAudioTrackId: (id: string | null) => void
@@ -19,15 +20,26 @@ export interface MediabunnyVideoProps {
 // drives the engine exactly like a native video element.
 export function MediabunnyVideo({
   init,
+  createEngine,
   onEngine,
   onAdapter,
   onSelectedAudioTrackId,
 }: MediabunnyVideoProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const attachMedia = useMediaAttach()
+  const initRef = useRef(init)
+  const createEngineRef = useRef(createEngine)
   const onEngineRef = useRef(onEngine)
   const onAdapterRef = useRef(onAdapter)
   const onSelectedAudioTrackIdRef = useRef(onSelectedAudioTrackId)
+
+  useEffect(() => {
+    initRef.current = init
+  }, [init])
+
+  useEffect(() => {
+    createEngineRef.current = createEngine
+  }, [createEngine])
 
   useEffect(() => {
     onEngineRef.current = onEngine
@@ -41,10 +53,18 @@ export function MediabunnyVideo({
     onSelectedAudioTrackIdRef.current = onSelectedAudioTrackId
   })
 
-  // One engine per source; `init` is memoized by the parent stage.
+  const sourceUrl = init.source.url
+
+  // Resume confirmation and other parent state updates can change the init
+  // object without changing the source. Keep the loaded engine for that source.
   useEffect(() => {
-    const engine = new MediabunnyEngine(init)
-    const adapter = new MediabunnyMediaAdapter(engine, init.source.url)
+    const currentInit = initRef.current
+
+    const engine =
+      createEngineRef.current?.(currentInit) ??
+      new MediabunnyEngine(currentInit)
+
+    const adapter = new MediabunnyMediaAdapter(engine, sourceUrl)
 
     const unsubscribe = engine.listen((event) => {
       if (event.type === "loaded") {
@@ -64,7 +84,7 @@ export function MediabunnyVideo({
       engine.dispose()
       attachMedia?.(null)
     }
-  }, [init, attachMedia])
+  }, [attachMedia, sourceUrl])
 
   return (
     <canvas
