@@ -102,9 +102,15 @@ async function createInputFor(
 
   const formats = [MP4, MATROSKA, WEBM, MP3, WAVE, OGG, ADTS, FLAC, MPEG_TS]
 
+  // Default UrlSource parallelism is 2: after a distant seek, reads at the
+  // target can queue behind workers still prefetching the pre-seek region
+  // (running workers are only evicted when idle). Four workers keep the
+  // seek target from waiting on stale speculation.
+  const sourceOptions = { parallelism: 4 }
+
   const direct = new Input({
     formats,
-    source: new UrlSource(source.url),
+    source: new UrlSource(source.url, sourceOptions),
   })
 
   attachInput(direct)
@@ -120,7 +126,7 @@ async function createInputFor(
     // reads for this source class go through the same-origin proxy.
     const proxied = new Input({
       formats,
-      source: new UrlSource(proxiedMediaUrl(source.url)),
+      source: new UrlSource(proxiedMediaUrl(source.url), sourceOptions),
     })
 
     attachInput(proxied)
@@ -204,6 +210,14 @@ export class MediabunnyEngine {
   private renderFrame: number | null = null
   private lastTimeupdateAt = 0
   private tracksValue: EngineTrack[] = []
+
+  // True once this audio run has scheduled its first buffer; the first
+  // buffer re-anchors the clock, later ones must not.
+  private audioRunPrimed = false
+
+  // Context time at which the last scheduled audio node ends, so a late
+  // batch of buffers serializes instead of stacking on the same instant.
+  private lastScheduledAudioEnd = 0
 
   constructor(init: EngineInit) {
     this.init = init
@@ -406,6 +420,23 @@ export class MediabunnyEngine {
     return Math.min(this.currentMediaTime(), this.durationValue)
   }
 
+  // Audio scheduled into Web Audio is the advanced engine's measurable
+  // playback buffer. A video-only source has no audio runway to report.
+  get bufferedAheadSeconds(): number | null {
+    if (this.audioContext === null || this.selectedAudioTrack === null) {
+      return null
+    }
+
+    if (!this.playing) {
+      return 0
+    }
+
+    return Math.max(
+      0,
+      this.lastScheduledAudioEnd - this.audioContext.currentTime
+    )
+  }
+
   get volume(): number {
     return this.volumeValue
   }
@@ -511,19 +542,28 @@ export class MediabunnyEngine {
     this.frozenMediaTime = clamped
     this.endedFlag = false
 
-    if (wasPlaying && this.audioContext !== null) {
-      if (this.audioContext.state === "suspended") {
-        await this.audioContext.resume()
+    try {
+      if (wasPlaying && this.audioContext !== null) {
+        if (this.audioContext.state === "suspended") {
+          await this.audioContext.resume().catch(() => {
+            // Same autoplay-policy hole as play(): without a running
+            // context there is no clock to resume onto.
+          })
+        }
+
+        if (this.audioContext.state === "running") {
+          this.playing = true
+          this.startPlayback(clamped)
+        } else {
+          await this.blitFrameAt(clamped)
+        }
+      } else {
+        await this.blitFrameAt(clamped)
       }
-
-      this.playing = true
-      this.startPlayback(clamped)
-    } else {
-      await this.blitFrameAt(clamped)
+    } finally {
+      this.seekingFlag = false
+      this.notify({ type: "seeked", currentTime: clamped })
     }
-
-    this.seekingFlag = false
-    this.notify({ type: "seeked", currentTime: clamped })
   }
 
   // One-shot frame decode so seeking while paused still moves the picture.
@@ -543,6 +583,8 @@ export class MediabunnyEngine {
 
     const sink = new CanvasSink(track, { poolSize: 1 })
 
+    // Paused-seek decode is cosmetic: on failure the previous frame stays
+    // on screen, and the next seek or play retries with a fresh sink.
     const wrapped = await sink.getCanvas(time).catch(() => null)
 
     if (this.disposed || generation !== this.generation) {
@@ -574,8 +616,12 @@ export class MediabunnyEngine {
     if (wasPlaying) {
       this.frozenMediaTime = this.currentMediaTime()
       this.playing = false
-      this.stopAudio()
     }
+
+    // Stop unconditionally: a run may still be filling asynchronously even
+    // while paused, and its iterator must be returned before the reference
+    // is dropped or its WASM decoder and fetches leak.
+    this.stopAudio()
 
     this.selectedAudioTrack = track
     this.audioSink = null
@@ -583,7 +629,13 @@ export class MediabunnyEngine {
 
     if (wasPlaying && this.audioContext !== null) {
       this.playing = true
-      void this.startAudio(this.frozenMediaTime)
+      const { generation, audioGeneration } = this
+
+      void this.runAudioTask(
+        this.startAudio(this.frozenMediaTime),
+        generation,
+        audioGeneration
+      )
     }
   }
 
@@ -630,8 +682,60 @@ export class MediabunnyEngine {
 
   private startPlayback(fromTime: number): void {
     this.reanchor(fromTime)
-    void this.startAudio(fromTime)
-    void this.startVideoLoop()
+    const { generation, audioGeneration } = this
+
+    void this.runAudioTask(
+      this.startAudio(fromTime),
+      generation,
+      audioGeneration
+    )
+    void this.runVideoTask(this.startVideoLoop(), generation)
+  }
+
+  // A run failure that escapes to here is real (mediabunny retries transient
+  // fetches internally); surfacing it beats the old behavior, where the
+  // audio feed died silently while the clock and video continued.
+  private async runAudioTask(
+    task: Promise<void>,
+    generation: number,
+    audioGeneration: number
+  ): Promise<void> {
+    try {
+      await task
+    } catch (error) {
+      if (
+        this.disposed ||
+        generation !== this.generation ||
+        audioGeneration !== this.audioGeneration
+      ) {
+        // The failed run was superseded by a seek, switch, or dispose; the
+        // run that replaced it owns the error surface now.
+        return
+      }
+
+      this.fail(
+        error instanceof Error ? error.message : String(error),
+        MEDIA_ERR_DECODE
+      )
+    }
+  }
+
+  private async runVideoTask(
+    task: Promise<void>,
+    generation: number
+  ): Promise<void> {
+    try {
+      await task
+    } catch (error) {
+      if (this.disposed || generation !== this.generation) {
+        return
+      }
+
+      this.fail(
+        error instanceof Error ? error.message : String(error),
+        MEDIA_ERR_DECODE
+      )
+    }
   }
 
   private stopPlayback(): void {
@@ -642,6 +746,8 @@ export class MediabunnyEngine {
   private stopAudio(): void {
     this.audioGeneration += 1
     this.audioFeedExhausted = false
+    this.audioRunPrimed = false
+    this.lastScheduledAudioEnd = 0
 
     const { activeAudioNodes } = this
     this.activeAudioNodes = []
@@ -828,16 +934,50 @@ export class MediabunnyEngine {
       return
     }
 
-    const node = context.createBufferSource()
-    node.buffer = buffer
-    node.playbackRate.value = this.rateValue
-    node.connect(gain)
+    // The first buffer of a run re-anchors the clock to real audio: after a
+    // seek or track switch the feed takes a moment to produce anything, the
+    // context clock kept running, and pre-computed schedule times are
+    // already in the past. Following the audio (rather than clamping it to
+    // "now") is what keeps the clock honest and prevents a backlog of
+    // buffers from stacking on one instant.
+    if (!this.audioRunPrimed) {
+      this.audioRunPrimed = true
+      this.reanchor(timestamp)
+    }
 
     const when =
       this.anchorContextTime +
       (timestamp - this.anchorMediaTime) / this.rateValue
 
-    const ended = new Promise<void>((resolve) => {
+    // Wholly stale buffers (an interruption longer than this buffer)
+    // are dropped, not clamped: playing them now would be a garbled burst.
+    if (when + buffer.duration / this.rateValue <= context.currentTime) {
+      return
+    }
+
+    const node = context.createBufferSource()
+    node.buffer = buffer
+    node.playbackRate.value = this.rateValue
+    node.connect(gain)
+
+    const startAt = Math.max(
+      when,
+      context.currentTime,
+      this.lastScheduledAudioEnd
+    )
+
+    this.lastScheduledAudioEnd = startAt + buffer.duration / this.rateValue
+
+    this.activeAudioNodes.push({
+      node,
+      ended: this.trackAudioNodeEnd(node),
+    })
+    node.start(startAt)
+  }
+
+  // Resolves when the node finishes and removes it from the capacity ledger.
+  private trackAudioNodeEnd(node: AudioBufferSourceNode): Promise<void> {
+    return new Promise<void>((resolve) => {
       node.addEventListener(
         "ended",
         () => {
@@ -849,9 +989,6 @@ export class MediabunnyEngine {
         { once: true }
       )
     })
-
-    this.activeAudioNodes.push({ node, ended })
-    node.start(Math.max(context.currentTime, when))
   }
 
   private async startVideoLoop(): Promise<void> {
@@ -934,11 +1071,34 @@ export class MediabunnyEngine {
     this.pullingFrame = true
     const { generation } = this
     const iterator = this.canvasIterator
-    const result = await iterator.next().catch(() => null)
-    this.pullingFrame = false
 
+    let result: IteratorResult<WrappedCanvas> | null = null
+
+    try {
+      result = await iterator.next()
+    } catch (error) {
+      this.pullingFrame = false
+
+      if (!this.disposed && generation === this.generation) {
+        this.fail(
+          error instanceof Error ? error.message : String(error),
+          MEDIA_ERR_DECODE
+        )
+      }
+
+      return
+    }
+
+    this.pullingFrame = false
+    this.acceptPulledFrame(result, iterator, generation)
+  }
+
+  private acceptPulledFrame(
+    result: IteratorResult<WrappedCanvas>,
+    iterator: AsyncGenerator<WrappedCanvas>,
+    generation: number
+  ): void {
     if (
-      result === null ||
       result.done ||
       this.disposed ||
       generation !== this.generation ||

@@ -2,11 +2,33 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+@import "@fontsource-variable/orbitron";
+
+/* A quick tone dip gives every site action a clear press state. */
+.myna-shell
+  :where(a[href], button:not(:disabled), [role="button"], summary):active:not(
+    [aria-disabled="true"]
+  ) {
+  filter: brightness(0.86);
+}
 
 @custom-variant dark (&:is(.dark *));
 @plugin "@tailwindcss/typography";
 
 :root {
+  --color-clipboard-shimmer: oklch(0.623 0.214 259.815);
+  --color-cyber-yellow: #fcee0a;
+  --color-cyber-yellow-light: #fff84a;
+  --color-cyber-cyan: #00f0ff;
+  --color-mask-reveal: #ffffff;
+  --color-mask-hide: #000000;
+  --color-chrome-stop-1: #ffffff;
+  --color-chrome-stop-2: #e2e8f0;
+  --color-chrome-stop-3: #64748b;
+  --color-chrome-stop-4: #f8fafc;
+  --color-chrome-stop-5: #94a3b8;
+  --subtitle-ass: #38bdf8;
   --radius: 0.625rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -42,7 +64,7 @@
 }
 
 @theme inline {
-  --font-sans: "Geist Variable", sans-serif;
+  --font-sans: "Orbitron Variable", "Orbitron", sans-serif;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -96,6 +118,8 @@
   --color-media-primary-foreground: var(--media-primary-foreground);
   --color-media-ring: var(--media-ring);
   --color-media-backdrop: var(--media-backdrop);
+  --color-subtitle-ass: var(--subtitle-ass);
+  --color-cyber-cyan: var(--color-cyber-cyan);
   --container-media-280: 17.5rem;
   --container-media-xs: 20rem;
   --container-media-360: 22.5rem;
@@ -165,6 +189,723 @@
   --spacing-media-hidden-indicator-offset: var(--media-hidden-indicator-offset);
   --spacing-media-hidden-preview-offset: var(--media-hidden-preview-offset);
   --spacing-media-hidden-seek-offset: var(--media-hidden-seek-offset);
+}
+
+/* Subtitle download progress: the width is runtime data, delivered through
+   a custom property set inline; this class owns the transition. */
+.myna-progress-fill {
+  width: var(--subtitle-progress, 0%);
+  transition:
+    width 300ms cubic-bezier(0.2, 0, 0, 1),
+    scale 150ms ease-out;
+}
+
+.myna-wordmark-svg {
+  display: inline-block;
+  height: 1em;
+  width: auto;
+  user-select: none;
+  vertical-align: middle;
+  overflow: visible;
+}
+
+.myna-clipboard-shimmer {
+  color: transparent;
+  background-image: linear-gradient(
+    110deg,
+    var(--primary) 0%,
+    var(--primary) 42%,
+    color-mix(in oklab, var(--primary), transparent 45%) 50%,
+    var(--primary) 58%,
+    var(--primary) 100%
+  );
+  background-position: 100% 0;
+  background-size: 250% 100%;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  -webkit-background-clip: text;
+  animation: myna-clipboard-shimmer 900ms ease-out forwards;
+}
+
+.myna-link-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--muted) 20%, transparent);
+  transition:
+    border-color 150ms ease-out,
+    box-shadow 150ms ease-out;
+}
+
+.myna-link-input:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 30%, transparent);
+}
+
+.myna-link-input > [data-slot="input-group"] {
+  border: 0;
+  background: transparent;
+  padding-right: 0;
+  height: 4rem;
+}
+
+.myna-link-input [data-slot="input-group-addon"][data-align="inline-end"] {
+  padding-right: 0.375rem;
+}
+
+.myna-link-input input {
+  height: 100%;
+  font-size: 1.125rem;
+}
+
+@media (min-width: 640px) {
+  .myna-link-input input {
+    font-size: 1.25rem;
+  }
+}
+
+.myna-link-input-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.myna-clipboard-dialog-preview {
+  box-shadow: inset 0 -1px color-mix(in oklab, var(--border) 80%, transparent);
+}
+
+.dark .myna-clipboard-dialog-preview {
+  box-shadow: inset 0 -1px
+    color-mix(in oklab, var(--foreground) 8%, transparent);
+}
+
+.myna-clipboard-suggestion {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 200ms,
+    opacity 200ms;
+}
+
+.myna-clipboard-suggestion[data-visible="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.myna-clipboard-dialog-actions > [data-slot="button"] {
+  width: 100%;
+  height: 3.375rem;
+}
+
+.myna-alert-dialog-content {
+  width: min(28rem, calc(100% - 2rem));
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+}
+
+.myna-watch-header {
+  grid-template-columns: 2.75rem minmax(0, 1fr);
+}
+
+.myna-history-pagination [aria-disabled="true"] {
+  pointer-events: none;
+  opacity: 0.4;
+}
+
+.myna-history-row {
+  grid-template-columns: 2.75rem minmax(0, 1fr) 2.75rem;
+}
+
+.myna-history-play {
+  grid-column: span 2;
+  grid-template-columns: subgrid;
+}
+
+.myna-subtitle-player-status {
+  position: absolute;
+  z-index: 20;
+  top: clamp(0.5rem, 2vw, 1rem);
+  left: 50%;
+  max-width: calc(100% - 1rem);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.myna-subtitle-progress {
+  width: 1.125rem;
+  height: 1.125rem;
+  flex: none;
+}
+
+.myna-subtitle-progress-track,
+.myna-subtitle-progress-indicator {
+  fill: none;
+  stroke-width: 2.5;
+}
+
+.myna-subtitle-progress-track {
+  stroke: color-mix(in oklab, currentColor 24%, transparent);
+}
+
+.myna-subtitle-progress-indicator {
+  stroke: currentColor;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 120ms linear;
+}
+
+.myna-clipboard-preview-input {
+  height: 3.375rem;
+  border-color: var(--border);
+}
+
+.myna-clipboard-preview-input[data-step="1"] {
+  border-color: var(--ring);
+}
+
+.myna-clipboard-preview-input[data-step="2"] {
+  border-color: var(--ring);
+}
+
+.myna-clipboard-cursor {
+  /* The tutorial pointer must sit above the mock input while it moves. */
+  position: absolute;
+  z-index: 10;
+  width: 1.5rem;
+  height: 1.5rem;
+  filter: drop-shadow(0 2px 2px rgb(0 0 0 / 25%));
+  transition:
+    left 700ms ease-out,
+    top 700ms ease-out,
+    opacity 700ms ease-out;
+}
+
+.myna-clipboard-cursor[data-step="0"] {
+  top: 75%;
+  left: 78%;
+  opacity: 0;
+}
+
+.myna-clipboard-cursor[data-step="1"] {
+  top: 58%;
+  left: 48%;
+  opacity: 1;
+}
+
+.myna-clipboard-cursor[data-step="2"] {
+  top: 32%;
+  left: 48%;
+  opacity: 0;
+}
+
+.myna-clipboard-cursor path {
+  fill: var(--background);
+  stroke: var(--foreground);
+}
+
+.myna-clipboard-icon-shimmer {
+  color: var(--color-clipboard-shimmer);
+  mask-image: linear-gradient(
+    90deg,
+    transparent 20%,
+    black 45%,
+    black 55%,
+    transparent 80%
+  );
+  mask-position: 150% 0;
+  mask-repeat: no-repeat;
+  mask-size: 250% 100%;
+  animation: myna-clipboard-icon-shimmer 900ms ease-out forwards;
+}
+
+@keyframes myna-clipboard-icon-shimmer {
+  to {
+    mask-position: -150% 0;
+  }
+}
+
+@keyframes myna-clipboard-shimmer {
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .myna-clipboard-suggestion {
+    transition: none;
+  }
+
+  .myna-clipboard-shimmer {
+    color: var(--primary);
+    background: none;
+    -webkit-text-fill-color: var(--primary);
+    animation: none;
+  }
+
+  .myna-clipboard-icon-shimmer {
+    mask-image: none;
+    animation: none;
+  }
+
+  .myna-clipboard-cursor {
+    display: none;
+  }
+}
+
+/* Marketing section backdrops. Pure cold palettes — deep slate, cobalt,
+   cyan, and steel. Dark-to-light ramps keep typography crisp and high contrast. */
+.myna-section-hero {
+  background:
+    radial-gradient(
+      110% 90% at 50% 0%,
+      oklch(0.18 0.015 240),
+      oklch(0.12 0.008 240) 65%
+    ),
+    oklch(0.1 0 0);
+}
+
+.myna-section-blue,
+.myna-section-cyan,
+.myna-section-violet {
+  position: relative;
+  transition:
+    background 350ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 350ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.myna-section-blue {
+  background: linear-gradient(
+    180deg,
+    oklch(0.2 0.05 258) 0%,
+    oklch(0.11 0.018 258) 100%
+  );
+}
+
+.myna-section-blue:hover {
+  background: linear-gradient(
+    180deg,
+    oklch(0.26 0.07 258) 0%,
+    oklch(0.13 0.024 258) 100%
+  );
+  box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 0.15);
+}
+
+.myna-section-cyan {
+  background: linear-gradient(
+    180deg,
+    oklch(0.21 0.065 275) 0%,
+    oklch(0.11 0.02 275) 100%
+  );
+}
+
+.myna-section-cyan:hover {
+  background: linear-gradient(
+    180deg,
+    oklch(0.27 0.085 275) 0%,
+    oklch(0.13 0.026 275) 100%
+  );
+  box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 0.15);
+}
+
+.myna-section-violet {
+  background: linear-gradient(
+    180deg,
+    oklch(0.2 0.06 305) 0%,
+    oklch(0.11 0.018 305) 100%
+  );
+}
+
+.myna-section-violet:hover {
+  background: linear-gradient(
+    180deg,
+    oklch(0.26 0.08 305) 0%,
+    oklch(0.13 0.024 305) 100%
+  );
+  box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 0.15);
+}
+
+.myna-section-steel {
+  background: linear-gradient(
+    180deg,
+    oklch(0.18 0.025 240) 0%,
+    oklch(0.1 0 0) 100%
+  );
+}
+
+.myna-section-ice {
+  background: linear-gradient(
+    180deg,
+    oklch(0.2 0.045 185) 0%,
+    oklch(0.11 0.015 190) 100%
+  );
+}
+
+/* Frosted surface shared with the player skin: the same blur/saturate pair,
+   hairline ring and white inset highlight `.media-skin` puts on its control
+   bar and popovers, lifted so marketing cards and the static demo player
+   read as one material. */
+.myna-glass {
+  background: oklch(1 0 0 / 0.06);
+  backdrop-filter: blur(16px) saturate(110%);
+  box-shadow:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.1),
+    inset 0 0 0 1px rgb(255 255 255 / 0.05),
+    0 1px 3px 0 oklch(0 0 0 / 0.15),
+    0 1px 2px -1px oklch(0 0 0 / 0.15);
+}
+
+/* Static scene behind the demo player — replaced by the bunny still, kept
+   out of the page. */
+/* Inline SVG turbulence, softened to a whisper — film grain without a file. */
+.myna-grain {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
+
+/* Marketing type scale. The one display statement and the section titles
+   share these — fluid sizes with Vercel-style tight leading, so the JSX
+   carries no one-off values. */
+.myna-display {
+  font-size: clamp(3rem, 8vw, 5rem);
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+  text-shadow: 0 3px 6px oklch(0 0 0 / 0.85);
+}
+
+.myna-title {
+  font-size: clamp(1.875rem, 3.5vw, 2.75rem);
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+
+/* Marketing section container: relative and clipped. Natural vertical rhythm
+   and consistent layout boundaries prevent awkward stretched viewports. */
+.myna-section {
+  position: relative;
+  overflow: hidden;
+}
+
+/* The hero's stage: text sits at prose width, the player breaks out to
+   this wider measure. */
+.myna-stage {
+  max-width: 88rem;
+}
+
+/* Frosted hairline seams between bands. One bright line with a soft glassy
+   bloom, fading at the rails. Bands get the top edge; the last band adds
+   the bottom edge so stacked sections never double the line. */
+@utility myna-glass-edge {
+  position: relative;
+}
+
+.myna-glass-edge::before,
+.myna-glass-edge-last::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    oklch(1 0 0 / 0.16) 18%,
+    oklch(1 0 0 / 0.16) 82%,
+    transparent
+  );
+  box-shadow:
+    0 0 10px oklch(1 0 0 / 0.08),
+    0 0 24px oklch(1 0 0 / 0.04);
+}
+
+.myna-glass-edge::before {
+  top: 0;
+}
+
+.myna-glass-edge-last::after {
+  bottom: 0;
+}
+
+/* Matroska ledger rows: index | stage + description | badge, tightening
+   on small screens. */
+.myna-ledger-row {
+  display: grid;
+  grid-template-columns: 3rem 1fr;
+  column-gap: 1rem;
+  row-gap: 0.375rem;
+  align-items: baseline;
+}
+
+@media (min-width: 640px) {
+  .myna-ledger-row {
+    grid-template-columns: 6rem minmax(0, 1fr) auto;
+    column-gap: 2rem;
+  }
+}
+
+/* Subtitle outlines. The ASS renderer (akarisub) paints a stroke behind the
+   fill; paint-order reproduces that crisp edge. PGS captions bake their
+   outline into the bitmap — same stroke treatment, tighter. */
+@utility myna-subtitle-ass-outline {
+  paint-order: stroke fill;
+  -webkit-text-stroke: 2.5px oklch(0 0 0 / 0.85);
+
+  @media (min-width: 640px) {
+    -webkit-text-stroke: 4px oklch(0 0 0 / 0.85);
+  }
+}
+
+@utility myna-subtitle-pgs {
+  paint-order: stroke fill;
+  -webkit-text-stroke: 3px oklch(0 0 0 / 0.85);
+}
+
+@utility myna-demo-static {
+  & button[aria-label="Play"],
+  & button[aria-label="Pause"],
+  & button[aria-label="Replay"] {
+    pointer-events: none;
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .myna-subtitle-ass-outline,
+  .myna-subtitle-pgs {
+    -webkit-text-stroke: 0;
+    text-shadow: 0 2px 3px rgb(0 0 0 / 0.9);
+  }
+}
+
+/* The ambient swatches are registered colors, so the hero can fade them
+   from reel to reel — a slow dissolve, never a jump. Browsers without
+   @property fall back to the pools' own background-color transition. */
+@property --ambient-a {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #000000;
+}
+
+@property --ambient-b {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #000000;
+}
+
+/* Fades engage only after the first swatch has landed, so a refresh
+   starts in the still's own colors instead of fading in from the
+   fallback. */
+.myna-section-hero.myna-ambient-live {
+  transition:
+    --ambient-a 1200ms cubic-bezier(0.16, 1, 0.3, 1),
+    --ambient-b 1200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Ambient light — three pools that never sit still: one drifting in from
+   each flank and a wide wash across the middle, so no part of the hero
+   goes dark. Color comes from the still on screen (the --ambient-*
+   properties from the reel) and each pool drifts on its own slow clock. */
+@utility myna-ambient-a {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+  transition: background-color 1200ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+  top: -6%;
+  left: -9%;
+  width: 56%;
+  aspect-ratio: 1 / 1.5;
+  background-color: var(--ambient-a, #000000);
+  opacity: 0.45;
+  animation: myna-ambient-drift-a 16s ease-in-out -3s infinite alternate;
+}
+
+@utility myna-ambient-b {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+  transition: background-color 1200ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+  top: 30%;
+  right: -9%;
+  width: 56%;
+  aspect-ratio: 1 / 1.5;
+  background-color: var(--ambient-b, #000000);
+  opacity: 0.4;
+  animation: myna-ambient-drift-b 21s ease-in-out -9s infinite alternate;
+}
+
+@utility myna-ambient-c {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+  transition: background-color 1200ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+  bottom: -16%;
+  left: 11%;
+  width: 78%;
+  aspect-ratio: 2.4 / 1;
+  background-color: color-mix(
+    in srgb,
+    var(--ambient-a, #000000),
+    var(--ambient-b, #000000)
+  );
+  opacity: 0.35;
+  animation: myna-ambient-drift-c 26s ease-in-out -12s infinite alternate;
+}
+
+@keyframes myna-ambient-drift-a {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+
+  to {
+    transform: translate3d(7%, 5%, 0) scale(1.14);
+  }
+}
+
+@keyframes myna-ambient-drift-b {
+  from {
+    transform: translate3d(0, 0, 0) scale(1.08);
+  }
+
+  to {
+    transform: translate3d(-6%, 6%, 0) scale(1);
+  }
+}
+
+@keyframes myna-ambient-drift-c {
+  from {
+    transform: translate3d(-3%, 0, 0) scale(1);
+  }
+
+  to {
+    transform: translate3d(3%, -3%, 0) scale(1.1);
+  }
+}
+
+/* Cinema player ambient backlight — casts direct, vibrant edge-matched
+   light from behind the video player onto the surrounding surface. */
+@utility myna-player-ambient {
+  position: absolute;
+  inset: -20px;
+  pointer-events: none;
+  /* The backlight belongs behind the hero player frame. */
+  z-index: -10;
+  overflow: visible;
+
+  @media (min-width: 640px) {
+    inset: -36px;
+  }
+
+  @media (min-width: 1024px) {
+    inset: -52px;
+  }
+}
+
+/* Micro-dither grain mask specifically over the ambient glow to eliminate
+   8-bit color banding rings and smooth out edge transitions. */
+.myna-player-ambient::after {
+  content: "";
+  position: absolute;
+  inset: -25%;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.18;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
+
+@utility myna-player-ambient-glow {
+  position: absolute;
+  inset: -12%;
+  border-radius: 40px;
+  filter: blur(56px);
+  pointer-events: none;
+  opacity: 0.9;
+  background:
+    radial-gradient(
+      ellipse 70% 85% at 18% 50%,
+      var(--ambient-a, #000000) 0%,
+      color-mix(in srgb, var(--ambient-a, #000000) 80%, transparent) 22%,
+      color-mix(in srgb, var(--ambient-a, #000000) 52%, transparent) 42%,
+      color-mix(in srgb, var(--ambient-a, #000000) 26%, transparent) 62%,
+      color-mix(in srgb, var(--ambient-a, #000000) 8%, transparent) 80%,
+      transparent 100%
+    ),
+    radial-gradient(
+      ellipse 70% 85% at 82% 50%,
+      var(--ambient-b, #000000) 0%,
+      color-mix(in srgb, var(--ambient-b, #000000) 80%, transparent) 22%,
+      color-mix(in srgb, var(--ambient-b, #000000) 52%, transparent) 42%,
+      color-mix(in srgb, var(--ambient-b, #000000) 26%, transparent) 62%,
+      color-mix(in srgb, var(--ambient-b, #000000) 8%, transparent) 80%,
+      transparent 100%
+    );
+  transition: background 1200ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+  animation: myna-player-ambient-breathe 16s ease-in-out infinite alternate;
+}
+
+@keyframes myna-player-ambient-breathe {
+  from {
+    transform: scale(1);
+  }
+
+  to {
+    transform: scale(1.04) translate3d(0, 1%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .myna-ambient-a,
+  .myna-ambient-b,
+  .myna-ambient-c,
+  .myna-player-ambient-glow {
+    animation: none;
+  }
+}
+
+/* Neutral light pool behind the hero player. Reduced motion keeps it
+   static. */
+@utility myna-glow {
+  position: absolute;
+  bottom: -35%;
+  aspect-ratio: 2 / 1;
+  border-radius: 50%;
+  filter: blur(72px);
+  pointer-events: none;
+}
+
+@utility myna-glow-neutral {
+  left: 50%;
+  width: 66%;
+  background: radial-gradient(
+    ellipse at center,
+    oklch(0.9 0.02 240 / 0.05),
+    transparent 70%
+  );
+  animation: myna-glow-drift-a 16s ease-in-out infinite alternate;
+}
+
+@keyframes myna-glow-drift-a {
+  from {
+    transform: translate(-50%, 0) scale(1);
+  }
+  to {
+    transform: translate(-50%, 4%) scale(1.12);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .myna-glow {
+    animation: none;
+  }
 }
 
 .dark {
@@ -373,6 +1114,7 @@
 @utility surface-media-inset {
   position: absolute;
   inset: 0;
+  /* Draw the inset highlight above its surface without intercepting input. */
   z-index: 10;
   pointer-events: none;
   border-radius: inherit;

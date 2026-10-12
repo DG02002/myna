@@ -9,7 +9,6 @@ import {
   Slider as SliderPrimitive,
   TimeSlider as TimeSliderPrimitive,
 } from "@videojs/react"
-import { SpinnerIcon as SpinnerIconPrimitive } from "@videojs/react/icons"
 
 import {
   SliderBuffer,
@@ -101,6 +100,7 @@ export function TimeSlider({
           "scale-80"
         )}
       />
+      {/* Keep the pointer marker above the track where the preview is anchored. */}
       <TimeSliderPrimitive.Preview
         className={cn(
           "group/preview relative h-1 [--media-slider-preview-max-height:var(--media-slider-preview-max-width)]",
@@ -136,16 +136,6 @@ export function TimeSlider({
             className={cn(
               "block transition-opacity duration-media-base ease-out",
               "group-data-loading/thumbnail:opacity-0"
-            )}
-          />
-
-          <SpinnerIconPrimitive
-            className={cn(
-              "absolute top-1/2 left-1/2 z-10 size-media-icon -translate-x-1/2 -translate-y-1/2 opacity-0",
-              "transition-opacity duration-media-base ease-out",
-              "group-not-data-loading/thumbnail:[--media-spinner-animation:none]",
-              "group-data-loading/thumbnail:opacity-100",
-              "drop-shadow-media-icon"
             )}
           />
         </SliderPrimitive.Thumbnail.Root>

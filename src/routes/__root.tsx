@@ -1,6 +1,14 @@
 import { TanStackDevtools } from "@tanstack/react-devtools"
-import { HeadContent, Scripts, createRootRoute } from "@tanstack/react-router"
+import {
+  HeadContent,
+  Link,
+  Scripts,
+  createRootRoute,
+} from "@tanstack/react-router"
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools"
+
+import { SiteFooter, SiteHeader } from "#/components/site-shell"
+import { SITE_DESCRIPTION } from "#/lib/seo"
 
 import appCss from "../styles.css?url"
 
@@ -19,14 +27,28 @@ export const Route = createRootRoute({
       {
         title: "Myna",
       },
+      {
+        name: "description",
+        content: SITE_DESCRIPTION,
+      },
+      {
+        name: "theme-color",
+        content: "#090e16",
+      },
     ],
     links: [
       {
         rel: "stylesheet",
         href: appCss,
       },
+      {
+        rel: "icon",
+        href: "/favicon.svg",
+        type: "image/svg+xml",
+      },
     ],
   }),
+  notFoundComponent: NotFoundPage,
   shellComponent: RootDocument,
 })
 
@@ -38,7 +60,11 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <HeadContent />
       </head>
       <body className="font-sans antialiased">
-        {children}
+        <div className="myna-shell dark bg-background text-foreground flex min-h-svh flex-col">
+          <SiteHeader />
+          <div className="flex flex-1 flex-col">{children}</div>
+          <SiteFooter />
+        </div>
         {import.meta.env.DEV && (
           <TanStackDevtools
             config={{
@@ -55,5 +81,27 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <Scripts />
       </body>
     </html>
+  )
+}
+
+function NotFoundPage() {
+  return (
+    <main className="flex flex-1 flex-col items-center justify-center gap-4 px-6 py-20 md:px-8 lg:px-8 text-center">
+      <p className="text-muted-foreground text-sm font-medium tracking-widest uppercase">
+        404
+      </p>
+      <h1 className="text-3xl font-semibold tracking-tight">
+        That page isn&apos;t here.
+      </h1>
+      <p className="text-muted-foreground max-w-md text-balance">
+        Head back to Myna and open a media link from your library.
+      </p>
+      <Link
+        to="/add"
+        className="bg-primary text-primary-foreground hover:opacity-90 rounded-xl px-5 py-3 text-sm font-medium transition-opacity duration-150 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        Open the app
+      </Link>
+    </main>
   )
 }

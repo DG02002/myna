@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-16 8 400 114" width="100%" height="100%">
+  <defs>
+    <linearGradient id="mynaChrome" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="42%" stop-color="#E2E8F0"/>
+      <stop offset="48%" stop-color="#64748B"/>
+      <stop offset="52%" stop-color="#F8FAFC"/>
+      <stop offset="100%" stop-color="#94A3B8"/>
+    </linearGradient>
+    <mask id="mynaCpMask">
+      <rect x="-100" y="-100" width="700" height="400" fill="#fff"/>
+      <polygon points="-50,38 500,38 500,41.5 -50,41.5" fill="#000"/>
+      <polygon points="200,67 340,43 340,46.5 200,70.5" fill="#000"/>
+      <polygon points="46,55 58,55 56,58 44,58" fill="#000"/>
+    </mask>
+  </defs>
+  <g transform="skewX(-14)">
+    <g fill="#00F0FF" opacity="0.8" transform="translate(-3.5, 2.5)" mask="url(#mynaCpMask)">
+      <path d="M 0 32 L 14 16 L 36 16 L 52 46 L 68 16 L 90 16 L 90 80 L 68 80 L 68 44 L 56 66 L 46 66 L 34 44 L 34 80 L 12 80 L 12 40 L 0 40 Z"/>
+      <path d="M 98 16 L 124 16 L 140 44 L 154 12 L 180 12 L 152 56 L 152 74 L 122 115 L 122 74 L 122 56 Z"/>
+      <path d="M 188 30 L 202 16 L 226 16 L 256 58 L 256 12 L 282 12 L 282 66 L 268 80 L 244 80 L 214 38 L 214 80 L 188 80 Z"/>
+      <path d="M 314 10 L 334 10 L 366 80 L 342 80 L 335 64 L 305 64 L 297 80 L 273 80 Z M 320 28 L 311 48 L 329 48 Z"/>
+      <polygon points="305,53 378,53 368,61 305,61"/>
+    </g>
+    <g fill="url(#mynaChrome)" mask="url(#mynaCpMask)">
+      <path d="M 0 32 L 14 16 L 36 16 L 52 46 L 68 16 L 90 16 L 90 80 L 68 80 L 68 44 L 56 66 L 46 66 L 34 44 L 34 80 L 12 80 L 12 40 L 0 40 Z"/>
+      <path d="M 98 16 L 124 16 L 140 44 L 154 12 L 180 12 L 152 56 L 152 74 L 122 115 L 122 74 L 122 56 Z"/>
+      <path d="M 188 30 L 202 16 L 226 16 L 256 58 L 256 12 L 282 12 L 282 66 L 268 80 L 244 80 L 214 38 L 214 80 L 188 80 Z"/>
+      <path d="M 314 10 L 334 10 L 366 80 L 342 80 L 335 64 L 305 64 L 297 80 L 273 80 Z M 320 28 L 311 48 L 329 48 Z"/>
+      <polygon points="305,53 378,53 368,61 305,61"/>
+    </g>
+  </g>
+</svg>

@@ -7,6 +7,7 @@
     }
 
     video::-webkit-media-text-track-container {
+      /* Keep native captions over video pixels and clear of the control bars. */
       z-index: 20;
       font-family: inherit;
       scale: 0.98;

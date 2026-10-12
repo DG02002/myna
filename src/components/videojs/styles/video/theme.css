@@ -4,20 +4,28 @@
   .media-skin:is([data-preset="video"], [data-preset="live-video"]) {
     /* Light border for browsers without `light-dark()`; see the `@supports` block below. */
     --media-frame-border: var(--media-border-color, rgb(0 0 0 / 0.1));
-    /* Scrims for browsers without relative colors or gradient interpolation; the `@supports` blocks below refine them. */
+    /* Keep text readable at the edges while leaving most of the frame clear. */
     --media-controls-gradient: linear-gradient(
       to top,
-      color-mix(in oklab, var(--media-backdrop) 40%, transparent),
-      color-mix(in oklab, var(--media-backdrop) 20%, transparent),
-      color-mix(in oklab, var(--media-backdrop) 50%, transparent)
+      color-mix(in oklab, var(--media-backdrop) 50%, transparent) 0%,
+      color-mix(in oklab, var(--media-backdrop) 44%, transparent) 3%,
+      color-mix(in oklab, var(--media-backdrop) 28%, transparent) 9%,
+      color-mix(in oklab, var(--media-backdrop) 12%, transparent) 17%,
+      transparent 25%,
+      transparent 75%,
+      color-mix(in oklab, var(--media-backdrop) 12%, transparent) 83%,
+      color-mix(in oklab, var(--media-backdrop) 28%, transparent) 91%,
+      color-mix(in oklab, var(--media-backdrop) 44%, transparent) 97%,
+      color-mix(in oklab, var(--media-backdrop) 50%, transparent) 100%
     );
     --media-caption-controls-y: calc(var(--media-spacing) * -14);
     --media-slider-preview-offset: calc(var(--media-spacing) * 9);
     --media-thumbnail-gradient: linear-gradient(
       to top,
-      color-mix(in oklab, var(--media-backdrop) 50%, transparent),
-      color-mix(in oklab, var(--media-backdrop) 10%, transparent),
-      transparent
+      color-mix(in oklab, var(--media-backdrop) 48%, transparent) 0%,
+      color-mix(in oklab, var(--media-backdrop) 32%, transparent) 5%,
+      color-mix(in oklab, var(--media-backdrop) 14%, transparent) 13%,
+      transparent 23%
     );
   }
 
@@ -26,9 +34,16 @@
     .media-skin:is([data-preset="video"], [data-preset="live-video"]) {
       --media-controls-gradient: linear-gradient(
         to top in oklab,
-        oklch(from var(--media-backdrop) l c h / 0.4),
-        oklch(from var(--media-backdrop) l c h / 0.2),
-        oklch(from var(--media-backdrop) l c h / 0.5)
+        oklch(from var(--media-backdrop) l c h / 0.5) 0%,
+        oklch(from var(--media-backdrop) l c h / 0.44) 3%,
+        oklch(from var(--media-backdrop) l c h / 0.28) 9%,
+        oklch(from var(--media-backdrop) l c h / 0.12) 17%,
+        oklch(from var(--media-backdrop) l c h / 0) 25%,
+        oklch(from var(--media-backdrop) l c h / 0) 75%,
+        oklch(from var(--media-backdrop) l c h / 0.12) 83%,
+        oklch(from var(--media-backdrop) l c h / 0.28) 91%,
+        oklch(from var(--media-backdrop) l c h / 0.44) 97%,
+        oklch(from var(--media-backdrop) l c h / 0.5) 100%
       );
     }
   }
@@ -37,9 +52,10 @@
     .media-skin:is([data-preset="video"], [data-preset="live-video"]) {
       --media-thumbnail-gradient: linear-gradient(
         to top,
-        oklch(from var(--media-backdrop) l c h / 0.5),
-        oklch(from var(--media-backdrop) l c h / 0.1),
-        transparent
+        oklch(from var(--media-backdrop) l c h / 0.48) 0%,
+        oklch(from var(--media-backdrop) l c h / 0.32) 5%,
+        oklch(from var(--media-backdrop) l c h / 0.14) 13%,
+        oklch(from var(--media-backdrop) l c h / 0) 23%
       );
     }
   }
@@ -51,8 +67,16 @@
     --media-frame-border: var(--media-border-color, rgb(0 0 0 / 0.15));
     --media-controls-gradient: linear-gradient(
       to top,
-      color-mix(in oklab, var(--media-backdrop) 50%, transparent),
-      color-mix(in oklab, var(--media-backdrop) 20%, transparent)
+      color-mix(in oklab, var(--media-backdrop) 44%, transparent) 0%,
+      color-mix(in oklab, var(--media-backdrop) 38%, transparent) 3%,
+      color-mix(in oklab, var(--media-backdrop) 24%, transparent) 9%,
+      color-mix(in oklab, var(--media-backdrop) 10%, transparent) 17%,
+      transparent 25%,
+      transparent 75%,
+      color-mix(in oklab, var(--media-backdrop) 10%, transparent) 83%,
+      color-mix(in oklab, var(--media-backdrop) 24%, transparent) 91%,
+      color-mix(in oklab, var(--media-backdrop) 38%, transparent) 97%,
+      color-mix(in oklab, var(--media-backdrop) 44%, transparent) 100%
     );
     --media-indicator-gradient: linear-gradient(
       to bottom,
@@ -73,8 +97,16 @@
       )[data-theme="neutral"] {
       --media-controls-gradient: linear-gradient(
         to top in oklab,
-        oklch(from var(--media-backdrop) l c h / 0.5),
-        oklch(from var(--media-backdrop) l c h / 0.2)
+        oklch(from var(--media-backdrop) l c h / 0.44) 0%,
+        oklch(from var(--media-backdrop) l c h / 0.38) 3%,
+        oklch(from var(--media-backdrop) l c h / 0.24) 9%,
+        oklch(from var(--media-backdrop) l c h / 0.1) 17%,
+        oklch(from var(--media-backdrop) l c h / 0) 25%,
+        oklch(from var(--media-backdrop) l c h / 0) 75%,
+        oklch(from var(--media-backdrop) l c h / 0.1) 83%,
+        oklch(from var(--media-backdrop) l c h / 0.24) 91%,
+        oklch(from var(--media-backdrop) l c h / 0.38) 97%,
+        oklch(from var(--media-backdrop) l c h / 0.44) 100%
       );
     }
   }

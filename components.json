@@ -22,6 +22,8 @@
   "menuColor": "default-translucent",
   "menuAccent": "subtle",
   "registries": {
-    "@videojs": "https://shadcn.videojs.org/r/react/{name}.json"
+    "@videojs": "https://shadcn.videojs.org/r/react/{name}.json",
+    "@coss": "https://coss.com/ui/r/{name}.json",
+    "@canvas-ui": "https://canvasui.dev/r/{name}.json"
   }
 }

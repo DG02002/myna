@@ -28,7 +28,16 @@ export interface SubtitleTrack {
       }
   status: "loading" | "available" | "ready" | "incomplete" | "failed"
   cues: SubtitleCue[]
+  // Present only while status is "loading"; drives the progress readout.
+  loadProgress?: SubtitleLoadProgress
 }
+
+// External files download (bytes known when the origin sends a length);
+// embedded Matroska tracks stream packet by packet (no total up front).
+export type SubtitleLoadProgress =
+  | { kind: "bytes"; loadedBytes: number; totalBytes: number | null }
+  | { kind: "steps"; completed: number; total: number }
+  | { kind: "cues"; cuesLoaded: number }
 
 export interface SubtitleTrackFlags {
   default: boolean
@@ -205,7 +214,11 @@ export function subtitleTrackName(
 // OK response body under the size bound.
 async function fetchSubtitleTextOnce(
   url: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onProgress?: (progress: {
+    loadedBytes: number
+    totalBytes: number | null
+  }) => void
 ): Promise<string | null> {
   if (signal.aborted) {
     return null
@@ -239,7 +252,11 @@ async function fetchSubtitleTextOnce(
       return null
     }
 
-    return await readBodyText(response.body, controller)
+    const totalBytes = Number.isFinite(length) && length > 0 ? length : null
+
+    return await readBodyText(response.body, controller, (loadedBytes) => {
+      onProgress?.({ loadedBytes, totalBytes })
+    })
   } catch {
     return null
   } finally {
@@ -250,12 +267,14 @@ async function fetchSubtitleTextOnce(
 
 function readBodyText(
   body: ReadableStream<Uint8Array>,
-  controller: AbortController
+  controller: AbortController,
+  emit: (loadedBytes: number) => void
 ): Promise<string | null> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let received = 0
   let text = ""
+  let lastReportAtMs = 0
 
   // Continuation-passing read so the size bound can abort mid-body without
   // awaiting inside a loop.
@@ -263,6 +282,8 @@ function readBodyText(
     const { done, value } = await reader.read()
 
     if (done) {
+      emit(received)
+
       return text + decoder.decode()
     }
 
@@ -275,6 +296,15 @@ function readBodyText(
       return null
     }
 
+    // Slow origins deliver many small chunks; 4 reports per second is
+    // plenty for a progress bar and keeps re-renders bounded.
+    const now = performance.now()
+
+    if (now - lastReportAtMs >= 250) {
+      lastReportAtMs = now
+      emit(received)
+    }
+
     return pull()
   }
 
@@ -283,18 +313,23 @@ function readBodyText(
 
 export async function loadSubtitleCues(
   url: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onProgress?: (progress: {
+    loadedBytes: number
+    totalBytes: number | null
+  }) => void
 ): Promise<SubtitleLoadResult> {
   // Direct first; the same-origin proxy only when the origin blocks
   // cross-origin reads (the same fallback order the advanced engine uses).
-  const directText = await fetchSubtitleTextOnce(url, signal)
+  const directText = await fetchSubtitleTextOnce(url, signal, onProgress)
 
   if (signal.aborted) {
     return { aborted: true }
   }
 
   const text =
-    directText ?? (await fetchSubtitleTextOnce(proxiedMediaUrl(url), signal))
+    directText ??
+    (await fetchSubtitleTextOnce(proxiedMediaUrl(url), signal, onProgress))
 
   if (signal.aborted) {
     return { aborted: true }

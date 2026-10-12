@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type RefObject,
   type ReactNode,
 } from "react"
 
@@ -17,6 +18,7 @@ import {
 } from "#/components/player/audio-tracks-context"
 import { MediabunnyVideo } from "#/components/player/mediabunny-video"
 import { PgsSubtitleOverlay } from "#/components/player/pgs-subtitle-overlay"
+import { SubtitlePlaybackStatus } from "#/components/player/subtitle-controls"
 import { SubtitleOverlay } from "#/components/player/subtitle-overlay"
 import { useSubtitles } from "#/components/player/subtitle-tracks"
 import { SubtitleTracksContext } from "#/components/player/subtitle-tracks-context"
@@ -73,10 +75,153 @@ interface MigrationSnapshot {
 }
 
 export interface PlaybackStageDetails {
+  mediaElement: HTMLVideoElement | null
+  engine: MediabunnyEngine | null
   subtitleTracks: SubtitleTrack[]
   addSubtitle: (url: string) => void
   canAddSubtitles: boolean
   embeddedProbeFailed: boolean
+}
+
+export interface PlaybackPositionChange {
+  currentTime: number
+  reason: "progress" | "seek" | "pause" | "ended"
+}
+
+function usePlaybackPositionTracking({
+  mode,
+  nativeMediaRef,
+  nativeVideoElement,
+  engine,
+  onPositionChange,
+  startTimeSeconds,
+}: {
+  mode: PlaybackEngineMode
+  nativeMediaRef: RefObject<HTMLVideoElement | null>
+  nativeVideoElement: HTMLVideoElement | null
+  engine: MediabunnyEngine | null
+  onPositionChange: (change: PlaybackPositionChange) => void
+  startTimeSeconds: number
+}) {
+  const [initialStartTimeSeconds, setInitialStartTimeSeconds] =
+    useState(startTimeSeconds)
+
+  useEffect(() => {
+    if (mode !== "native" || nativeVideoElement === null) {
+      return undefined
+    }
+
+    const element = nativeMediaRef.current
+
+    if (element === null) {
+      return undefined
+    }
+
+    let restored = initialStartTimeSeconds <= 0
+
+    const restorePosition = () => {
+      if (restored) {
+        return
+      }
+
+      restored = true
+
+      if (
+        Number.isFinite(element.duration) &&
+        element.duration > 0 &&
+        initialStartTimeSeconds < element.duration - 1
+      ) {
+        element.currentTime = initialStartTimeSeconds
+      }
+
+      // Keep the saved position available until metadata arrives, so a
+      // migration that happens during loading can still start at that point.
+      setInitialStartTimeSeconds(0)
+    }
+
+    if (element.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      restorePosition()
+    } else {
+      element.addEventListener("loadedmetadata", restorePosition, {
+        once: true,
+      })
+    }
+
+    const onTimeUpdate = () => {
+      if (restored) {
+        onPositionChange({
+          currentTime: element.currentTime,
+          reason: "progress",
+        })
+      }
+    }
+
+    const onSeeked = () => {
+      if (restored) {
+        onPositionChange({ currentTime: element.currentTime, reason: "seek" })
+      }
+    }
+
+    const onPause = () => {
+      if (restored) {
+        onPositionChange({ currentTime: element.currentTime, reason: "pause" })
+      }
+    }
+
+    const onEnded = () => {
+      if (restored) {
+        onPositionChange({ currentTime: element.currentTime, reason: "ended" })
+      }
+    }
+
+    element.addEventListener("timeupdate", onTimeUpdate)
+    element.addEventListener("seeked", onSeeked)
+    element.addEventListener("pause", onPause)
+    element.addEventListener("ended", onEnded)
+
+    return () => {
+      element.removeEventListener("loadedmetadata", restorePosition)
+      element.removeEventListener("timeupdate", onTimeUpdate)
+      element.removeEventListener("seeked", onSeeked)
+      element.removeEventListener("pause", onPause)
+      element.removeEventListener("ended", onEnded)
+
+      if (restored) {
+        onPositionChange({ currentTime: element.currentTime, reason: "pause" })
+      }
+    }
+  }, [
+    initialStartTimeSeconds,
+    mode,
+    nativeMediaRef,
+    nativeVideoElement,
+    onPositionChange,
+  ])
+
+  useEffect(() => {
+    if (mode !== "mediabunny" || engine === null) {
+      return undefined
+    }
+
+    const unsubscribe = engine.listen((event) => {
+      if (event.type === "timeupdate") {
+        onPositionChange({ currentTime: event.currentTime, reason: "progress" })
+      } else if (event.type === "seeked") {
+        onPositionChange({ currentTime: event.currentTime, reason: "seek" })
+      } else if (event.type === "pause") {
+        onPositionChange({ currentTime: engine.currentTime, reason: "pause" })
+      } else if (event.type === "ended") {
+        onPositionChange({ currentTime: engine.currentTime, reason: "ended" })
+      }
+    })
+
+    return () => {
+      onPositionChange({ currentTime: engine.currentTime, reason: "pause" })
+      unsubscribe()
+    }
+  }, [engine, mode, onPositionChange])
+
+  return initialStartTimeSeconds
 }
 
 // The native engine wins until it cannot do the job: a fatal native error,
@@ -85,13 +230,17 @@ export interface PlaybackStageDetails {
 // source URL, so it mounts fresh per source.
 export function PlaybackStage({
   source,
+  startTimeSeconds,
   onProbe,
   onModeChange,
+  onPositionChange,
   renderDetails,
 }: {
   source: PlaybackSource
+  startTimeSeconds: number
   onProbe: (state: ProbeState) => void
   onModeChange: (mode: PlaybackEngineMode) => void
+  onPositionChange: (change: PlaybackPositionChange) => void
   renderDetails?: (details: PlaybackStageDetails) => ReactNode
 }) {
   const [mode, setMode] = useState<PlaybackEngineMode>("native")
@@ -112,6 +261,15 @@ export function PlaybackStage({
 
   const [nativeVideoElement, setNativeVideoElement] =
     useState<HTMLVideoElement | null>(null)
+
+  const initialStartTimeSeconds = usePlaybackPositionTracking({
+    mode,
+    nativeMediaRef,
+    nativeVideoElement,
+    engine,
+    onPositionChange,
+    startTimeSeconds,
+  })
 
   const attachNativeVideo = useCallback((element: HTMLVideoElement | null) => {
     nativeMediaRef.current = element
@@ -136,25 +294,25 @@ export function PlaybackStage({
     matroskaUrl,
   })
 
-  useEffect(() => {
-    onProbe(probeState)
-  }, [onProbe, probeState])
-
   // Native sources load after mount so startup errors reach player state.
   // HLS sources are owned by the HlsJsVideo adapter, which manages the
   // element's source itself.
   useEffect(() => {
+    onProbe(probeState)
+
     if (mode !== "native" || hlsSource) {
-      return
+      return undefined
     }
 
-    const element = nativeMediaRef.current
+    const element = nativeVideoElement
 
-    if (element !== null) {
-      element.src = source.url
+    if (element !== null && element.src !== source.url) {
+      element.setAttribute("src", source.url)
       element.load()
     }
-  }, [mode, nativeMediaRef, source.url, hlsSource])
+
+    return undefined
+  }, [hlsSource, mode, nativeVideoElement, onProbe, probeState, source.url])
 
   const audioTracks = useMemo(() => {
     if (probeState.status !== "ready") {
@@ -166,6 +324,7 @@ export function PlaybackStage({
       .map((track) => ({
         id: `${track.kind}-${track.number}`,
         label: `${probeTrackLabel(track)}${track.default ? " · Default" : ""}`,
+        default: track.default,
         // canDecode reflects the browser's own decoders: an E-AC-3/AC-3
         // track reports false until the engine lazily registers its WASM
         // decoder, so a false default track still needs the engine.
@@ -176,12 +335,14 @@ export function PlaybackStage({
   // Native playback does not expose its selected Matroska audio track in
   // Chrome. Keep the selection unknown until the user chooses one or the
   // advanced engine reports its actual selection.
-  const effectiveSelectedId = selectedAudioTrackId
-
   const migrateToEngine = useCallback(
     (nextAudioTrackId: string | null, element: HTMLVideoElement | null) => {
       setSnapshot({
-        time: element?.currentTime ?? 0,
+        time:
+          element !== null &&
+          element.readyState >= HTMLMediaElement.HAVE_METADATA
+            ? element.currentTime
+            : initialStartTimeSeconds,
         wasPlaying: element !== null && !element.paused,
         volume: element?.volume ?? 1,
         muted: element?.muted ?? false,
@@ -196,8 +357,65 @@ export function PlaybackStage({
         setSelectedAudioTrackId(nextAudioTrackId)
       }
     },
-    [onModeChange, selectedSubtitleId]
+    [initialStartTimeSeconds, onModeChange, selectedSubtitleId]
   )
+
+  useEffect(() => {
+    if (
+      mode !== "native" ||
+      hlsSource ||
+      selectedAudioTrackId !== null ||
+      probeState.status !== "ready" ||
+      !probeState.result.containerName.toLowerCase().includes("matroska") ||
+      audioTracks.length < 2
+    ) {
+      return undefined
+    }
+
+    const element = nativeVideoElement
+
+    if (element === null) {
+      return undefined
+    }
+
+    let migrationRequested = false
+
+    const migrateToContainerDefault = () => {
+      if (migrationRequested || element.paused) {
+        return
+      }
+
+      const preferredTrack =
+        audioTracks.find((track) => track.default) ?? audioTracks[0]
+
+      if (preferredTrack === undefined) {
+        return
+      }
+
+      migrationRequested = true
+      migrateToEngine(preferredTrack.id, element)
+    }
+
+    // Browsers can ignore Matroska's default audio flag and Chrome does not
+    // expose native track selection here. Use the container's marked track
+    // for multitrack Matroska playback instead of leaving that choice to the
+    // browser's default.
+    element.addEventListener("play", migrateToContainerDefault)
+    element.addEventListener("timeupdate", migrateToContainerDefault)
+
+    return () => {
+      element.removeEventListener("play", migrateToContainerDefault)
+      element.removeEventListener("timeupdate", migrateToContainerDefault)
+    }
+  }, [
+    audioTracks,
+    hlsSource,
+    migrateToEngine,
+    mode,
+    nativeVideoElement,
+    probeState,
+    selectedAudioTrackId,
+  ])
 
   const selectTrack = useCallback(
     (id: string) => {
@@ -208,7 +426,7 @@ export function PlaybackStage({
       }
 
       if (mode === "mediabunny") {
-        if (id !== effectiveSelectedId) {
+        if (id !== selectedAudioTrackId) {
           setSelectedAudioTrackId(id)
           void engine?.selectAudioTrack(id)
         }
@@ -222,7 +440,7 @@ export function PlaybackStage({
       // native engine is actually playing it; otherwise migrate at the
       // current position.
       const alreadyNativelyServed =
-        id === effectiveSelectedId && track.nativeDecodable
+        id === selectedAudioTrackId && track.nativeDecodable
 
       if (!alreadyNativelyServed) {
         migrateToEngine(id, nativeMediaRef.current)
@@ -230,7 +448,7 @@ export function PlaybackStage({
     },
     [
       audioTracks,
-      effectiveSelectedId,
+      selectedAudioTrackId,
       engine,
       mode,
       migrateToEngine,
@@ -246,20 +464,20 @@ export function PlaybackStage({
       return
     }
 
-    migrateToEngine(effectiveSelectedId, nativeMediaRef.current)
-  }, [effectiveSelectedId, hlsSource, mode, migrateToEngine, nativeMediaRef])
+    migrateToEngine(selectedAudioTrackId, nativeMediaRef.current)
+  }, [selectedAudioTrackId, hlsSource, mode, migrateToEngine, nativeMediaRef])
 
   const engineInit = useMemo<EngineInit>(
     () => ({
       source,
-      startTime: snapshot?.time ?? 0,
+      startTime: snapshot?.time ?? initialStartTimeSeconds,
       autoPlay: snapshot?.wasPlaying ?? true,
       volume: snapshot?.volume ?? 1,
       muted: snapshot?.muted ?? false,
       playbackRate: snapshot?.playbackRate ?? 1,
       audioTrackId: snapshot?.audioTrackId ?? null,
     }),
-    [source, snapshot]
+    [initialStartTimeSeconds, source, snapshot]
   )
 
   const contextValues = useMemo(() => {
@@ -267,14 +485,14 @@ export function PlaybackStage({
 
     if (mode === "native") {
       selectionLabel = "Browser default"
-    } else if (effectiveSelectedId === null) {
+    } else if (selectedAudioTrackId === null) {
       selectionLabel = "Loading…"
     }
 
     return {
       audio: {
         tracks: audioTracks,
-        selectedId: effectiveSelectedId,
+        selectedId: selectedAudioTrackId,
         selectionLabel,
         selectTrack,
       } satisfies AudioTracksValue,
@@ -286,7 +504,7 @@ export function PlaybackStage({
     }
   }, [
     audioTracks,
-    effectiveSelectedId,
+    selectedAudioTrackId,
     mode,
     restoreSubtitleSelection,
     selectTrack,
@@ -301,6 +519,7 @@ export function PlaybackStage({
           {mode === "native" ? (
             <VideoPlayer key="native">
               <VideoSkin className="aspect-video w-full">
+                <SubtitlePlaybackStatus track={selectedSubtitleTrack} />
                 {hlsSource ? (
                   <LazyHlsVideo
                     sourceUrl={source.url}
@@ -349,6 +568,7 @@ export function PlaybackStage({
           ) : (
             <VideoPlayer key="mediabunny">
               <VideoSkin className="aspect-video w-full">
+                <SubtitlePlaybackStatus track={selectedSubtitleTrack} />
                 <MediabunnyVideo
                   init={engineInit}
                   onEngine={setEngine}
@@ -404,6 +624,8 @@ export function PlaybackStage({
             </VideoPlayer>
           )}
           {renderDetails?.({
+            mediaElement: nativeVideoElement,
+            engine,
             subtitleTracks,
             addSubtitle,
             canAddSubtitles: !hlsSource,

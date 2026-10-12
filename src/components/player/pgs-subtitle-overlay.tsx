@@ -305,6 +305,7 @@ export function PgsSubtitleOverlay({
   }, [adapter, nativeVideo, session, trackId, useAdvancedEngine])
 
   return (
+    // Captions overlay the video and remain below the player controls.
     <div
       ref={hostRef}
       aria-hidden="true"

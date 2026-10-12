@@ -14,6 +14,7 @@ const PASSTHROUGH_RESPONSE_HEADERS = [
   "content-type",
   "content-length",
   "content-range",
+  "content-disposition",
   "accept-ranges",
   "etag",
   "last-modified",
@@ -23,7 +24,7 @@ const PASSTHROUGH_RESPONSE_HEADERS = [
 const CORS_ALLOW_HEADERS = "If-Modified-Since, If-None-Match, If-Range, Range"
 
 const CORS_EXPOSE_HEADERS =
-  "Accept-Ranges, Cache-Control, Content-Length, Content-Range, Content-Type, ETag, Last-Modified, Server-Timing"
+  "Accept-Ranges, Cache-Control, Content-Disposition, Content-Length, Content-Range, Content-Type, ETag, Last-Modified, Server-Timing"
 
 const MAX_REDIRECT_HOPS = 5
 

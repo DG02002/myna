@@ -39,9 +39,18 @@ export interface MatroskaAssTrackStream {
   subscribePackets(listener: (packets: MatroskaAssPacket[]) => void): () => void
 }
 
+export interface MatroskaSubtitleReadProgress {
+  completed: number
+  total: number
+}
+
 export interface MatroskaSubtitleReader {
   probe(signal: AbortSignal): Promise<MatroskaTextTrack[]>
-  readCues(trackNumber: number, signal: AbortSignal): Promise<SubtitleCue[]>
+  readCues(
+    trackNumber: number,
+    signal: AbortSignal,
+    onProgress?: (progress: MatroskaSubtitleReadProgress) => void
+  ): Promise<SubtitleCue[]>
   streamPgsTrack(
     trackNumber: number,
     signal: AbortSignal
@@ -53,7 +62,8 @@ export interface MatroskaSubtitleReader {
   ): AsyncIterable<MatroskaPgsWindowEvent>
   streamAssTrack(
     trackNumber: number,
-    signal: AbortSignal
+    signal: AbortSignal,
+    onProgress?: (progress: MatroskaSubtitleReadProgress) => void
   ): MatroskaAssTrackStream
   readAssTrack(
     trackNumber: number,
@@ -442,6 +452,16 @@ function normalizeTextTrackFailure(
   }
 
   return failure
+}
+
+function reportSubtitleReadProgress(
+  onProgress: ((progress: MatroskaSubtitleReadProgress) => void) | undefined,
+  completed: number,
+  total: number
+): void {
+  if (total > 0) {
+    onProgress?.({ completed: Math.min(total, completed), total })
+  }
 }
 
 const PAGE_SIZE = 8 * 1024
@@ -1002,6 +1022,14 @@ interface IndexedCueOptions {
   trackNumber: number
   cuePoints: CuePoint[]
   signal: AbortSignal
+  onProgress?: (progress: MatroskaSubtitleReadProgress) => void
+}
+
+interface TrackBlockReadOptions {
+  metadata: ParsedFile
+  trackNumber: number
+  signal: AbortSignal
+  onProgress?: (progress: MatroskaSubtitleReadProgress) => void
 }
 
 interface CueClusterOptions {
@@ -1017,6 +1045,7 @@ type IndexedCueCluster = [clusterPosition: number, positions: TrackPosition[]]
 interface IndexedClusterReadWindowOptions<T> {
   clusters: IndexedCueCluster[]
   signal: AbortSignal
+  onProgress?: (progress: MatroskaSubtitleReadProgress) => void
   concurrency?: number
   window?: number
   readCluster: (cluster: IndexedCueCluster, signal: AbortSignal) => Promise<T[]>
@@ -1069,6 +1098,10 @@ class IndexedClusterReadWindow<T> {
         const ready = this.takeContiguousResults()
 
         if (ready.advanced) {
+          this.options.onProgress?.({
+            completed: this.nextToYield,
+            total: this.options.clusters.length,
+          })
           this.startAvailableReads()
 
           if (ready.blocks.length > 0) {
@@ -1234,6 +1267,7 @@ interface AssTrackPacketReadOptions {
   signal: AbortSignal
   stream: MutableMatroskaAssTrackStream
   extendDeadline: () => void
+  onProgress?: (progress: MatroskaSubtitleReadProgress) => void
 }
 
 function createMatroskaAssTrackStream(): MutableMatroskaAssTrackStream {
@@ -2617,7 +2651,8 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
 
   async readCues(
     trackNumber: number,
-    signal: AbortSignal
+    signal: AbortSignal,
+    onProgress?: (progress: MatroskaSubtitleReadProgress) => void
   ): Promise<SubtitleCue[]> {
     const deadline = withDeadline(signal)
     const extendDeadline = deadline.extend
@@ -2636,11 +2671,12 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
 
       orderedContentEncodings(track)
 
-      const blocks = await this.readTrackBlocks(
+      const blocks = await this.readTrackBlocks({
         metadata,
         trackNumber,
-        deadline.signal
-      )
+        signal: deadline.signal,
+        onProgress,
+      })
 
       if (blocks.length === 0) {
         throw new MatroskaSubtitleError("invalid")
@@ -3203,7 +3239,8 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
 
   streamAssTrack(
     trackNumber: number,
-    signal: AbortSignal
+    signal: AbortSignal,
+    onProgress?: (progress: MatroskaSubtitleReadProgress) => void
   ): MatroskaAssTrackStream {
     // Font data and cue packets need a larger byte budget than Phase 8 text
     // cues. Use an isolated reader so selecting ASS never changes UTF8 limits.
@@ -3215,17 +3252,26 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     const trackStream = createMatroskaAssTrackStream()
 
     void reader
-      .readAssTrackWithinBudget(trackNumber, signal, trackStream)
+      .readAssTrackWithinBudget({
+        trackNumber,
+        signal,
+        stream: trackStream,
+        onProgress,
+      })
       .then(trackStream.complete, trackStream.fail)
 
     return trackStream.stream
   }
 
-  private async readAssTrackWithinBudget(
-    trackNumber: number,
-    signal: AbortSignal,
-    stream: MutableMatroskaAssTrackStream
-  ): Promise<MatroskaAssTrackData> {
+  private async readAssTrackWithinBudget({
+    trackNumber,
+    signal,
+    stream,
+    onProgress,
+  }: Pick<
+    AssTrackPacketReadOptions,
+    "trackNumber" | "signal" | "stream" | "onProgress"
+  >): Promise<MatroskaAssTrackData> {
     const deadline = withDeadline(signal, ASS_TRACK_DEADLINE_MS)
 
     try {
@@ -3242,6 +3288,7 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
         trackNumber,
         signal: deadline.signal,
         stream,
+        onProgress,
         // The deadline is a no-progress bound: through a slow proxy the whole
         // track can outrun the wall clock while every read keeps succeeding.
         extendDeadline: deadline.extend,
@@ -3329,15 +3376,17 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     signal,
     stream,
     extendDeadline,
+    onProgress,
   }: AssTrackPacketReadOptions): Promise<MatroskaAssPacket[]> {
     const packets: MatroskaAssPacket[] = []
     let packetBytes = 0
 
-    for await (const blocks of this.readTrackBlockBatches(
+    for await (const blocks of this.readTrackBlockBatches({
       metadata,
       trackNumber,
-      signal
-    )) {
+      signal,
+      onProgress,
+    })) {
       const batch = this.createAssPackets(blocks, metadata.timestampScale)
 
       packets.push(...batch)
@@ -4174,18 +4223,20 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     }
   }
 
-  private async readTrackBlocks(
-    metadata: ParsedFile,
-    trackNumber: number,
-    signal: AbortSignal
-  ): Promise<DecodedBlock[]> {
+  private async readTrackBlocks({
+    metadata,
+    trackNumber,
+    signal,
+    onProgress,
+  }: TrackBlockReadOptions): Promise<DecodedBlock[]> {
     const blocks: DecodedBlock[] = []
 
-    for await (const batch of this.readTrackBlockBatches(
+    for await (const batch of this.readTrackBlockBatches({
       metadata,
       trackNumber,
-      signal
-    )) {
+      signal,
+      onProgress,
+    })) {
       this.appendDecodedBlocks(blocks, batch)
     }
 
@@ -4652,11 +4703,12 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     }
   }
 
-  private async *readTrackBlockBatches(
-    metadata: ParsedFile,
-    trackNumber: number,
-    signal: AbortSignal
-  ): AsyncGenerator<DecodedBlock[]> {
+  private async *readTrackBlockBatches({
+    metadata,
+    trackNumber,
+    signal,
+    onProgress,
+  }: TrackBlockReadOptions): AsyncGenerator<DecodedBlock[]> {
     const cuePositions = await this.readCuePositions(
       metadata,
       trackNumber,
@@ -4664,7 +4716,12 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     )
 
     if (cuePositions.length === 0) {
-      const blocks = await this.scanForTrack(metadata, trackNumber, signal)
+      const blocks = await this.scanForTrack({
+        metadata,
+        trackNumber,
+        signal,
+        onProgress,
+      })
 
       if (blocks.length > 0) {
         yield blocks
@@ -4678,6 +4735,7 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
       trackNumber,
       cuePoints: cuePositions,
       signal,
+      onProgress,
     })
   }
 
@@ -5496,6 +5554,7 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     trackNumber,
     cuePoints,
     signal,
+    onProgress,
   }: IndexedCueOptions): AsyncGenerator<DecodedBlock[]> {
     const clusters = [...groupCuePositions(cuePoints)]
     let blockCount = 0
@@ -5513,6 +5572,7 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     const readWindow = new IndexedClusterReadWindow({
       clusters,
       signal,
+      onProgress,
       readCluster: ([clusterPosition, positions], readSignal) =>
         this.readCueCluster({
           metadata,
@@ -5648,11 +5708,12 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     return textBytes
   }
 
-  private async scanForTrack(
-    metadata: ParsedFile,
-    trackNumber: number,
-    signal: AbortSignal
-  ): Promise<DecodedBlock[]> {
+  private async scanForTrack({
+    metadata,
+    trackNumber,
+    signal,
+    onProgress,
+  }: TrackBlockReadOptions): Promise<DecodedBlock[]> {
     if (metadata.firstCluster === null) {
       throw new MatroskaSubtitleError("unsupported")
     }
@@ -5671,24 +5732,27 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
         throw new MatroskaSubtitleError("aborted")
       }
 
-      const scanned = await this.readScannedCluster({
+      const scanned = await this.readAndAppendScannedTrackCluster({
         metadata,
-        offset,
         trackNumber,
         signal,
+        offset,
+        blocks,
+        textBytes,
       })
 
-      if (scanned.blocks === null) {
+      if (scanned === null) {
+        reportSubtitleReadProgress(onProgress, 1, 1)
         break
       }
 
-      textBytes += this.appendDecodedBlocks(blocks, scanned.blocks)
+      ;({ nextOffset: offset, textBytes } = scanned)
 
-      if (textBytes > MAX_SUBTITLE_TEXT_BYTES) {
-        throw new MatroskaSubtitleError("limit")
-      }
-
-      offset = scanned.nextOffset
+      reportSubtitleReadProgress(
+        onProgress,
+        offset - metadata.firstCluster.start,
+        scanEnd - metadata.firstCluster.start
+      )
     }
 
     if (offset < metadata.segmentEnd && offset >= scanEnd) {
@@ -5696,6 +5760,42 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     }
 
     return blocks
+  }
+
+  private async readAndAppendScannedTrackCluster({
+    metadata,
+    trackNumber,
+    signal,
+    offset,
+    blocks,
+    textBytes,
+  }: {
+    metadata: ParsedFile
+    trackNumber: number
+    signal: AbortSignal
+    offset: number
+    blocks: DecodedBlock[]
+    textBytes: number
+  }): Promise<{ nextOffset: number; textBytes: number } | null> {
+    const scanned = await this.readScannedCluster({
+      metadata,
+      offset,
+      trackNumber,
+      signal,
+    })
+
+    if (scanned.blocks === null) {
+      return null
+    }
+
+    const nextTextBytes =
+      textBytes + this.appendDecodedBlocks(blocks, scanned.blocks)
+
+    if (nextTextBytes > MAX_SUBTITLE_TEXT_BYTES) {
+      throw new MatroskaSubtitleError("limit")
+    }
+
+    return { nextOffset: scanned.nextOffset, textBytes: nextTextBytes }
   }
 
   private async readScannedCluster({

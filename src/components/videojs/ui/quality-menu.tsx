@@ -56,6 +56,7 @@ export function QualityMenu({ ...props }: QualityMenuProps = {}) {
             <MenuChevron />
           </span>
         </Menu.Trigger>
+        {/* Layer nested menu panels above their parent during the slide. */}
         <Menu.Content
           className={cn(
             "[anchor-scope:--media-menu-item-highlight-anchor]",

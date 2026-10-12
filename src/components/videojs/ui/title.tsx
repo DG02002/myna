@@ -16,6 +16,7 @@ export function Title({ className, ...props }: TitleProps = {}) {
     <TitlePrimitive
       className={(state) =>
         cn(
+          // Keep title text above the video image and below the controls.
           "pointer-events-none absolute inset-x-0 top-0 z-20 isolate",
           "wrap-anywhere px-6 pt-2.5 text-media font-medium tracking-[-0.0125em] text-media-controls-foreground text-shadow-media",
           "media-md:text-media-xl media-md:px-6 media-md:pt-4",

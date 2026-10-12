@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://myna.dg02002.workers.dev/sitemap.xml

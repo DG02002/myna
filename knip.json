@@ -1,7 +1,6 @@
 {
   "$schema": "./node_modules/knip.schema.json",
   "treatConfigHintsAsErrors": true,
-  "ignoreDependencies": ["@hugeicons/core-free-icons", "@hugeicons/react"],
   "entry": ["src/routes/**/*.{ts,tsx}!", "src/router.tsx!", "scripts/**/*.ts"],
   "project": [
     "src/**/*.{ts,tsx}!",

@@ -69,6 +69,7 @@ export function SliderBuffer({ className, ...props }: SliderBufferProps) {
 /** Shared slider thumb. */
 export type SliderThumbProps = ComponentProps<"div">
 
+/** Keep the thumb above the buffered and played track. */
 export function SliderThumb({ className, ...props }: SliderThumbProps) {
   return (
     <div

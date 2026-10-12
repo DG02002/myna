@@ -30,3 +30,7 @@ temp/
 !src/lib/
 !scripts/
 !.agents/**/scripts/
+
+# Dependency patches are source even when a global ignore excludes *.patch.
+!patches/
+!patches/*.patch

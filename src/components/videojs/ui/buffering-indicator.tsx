@@ -31,6 +31,7 @@ export function BufferingIndicator({
       }
       {...props}
     >
+      {/* Keep the spinner above the absolutely positioned blur scrim. */}
       <SpinnerIconPrimitive
         className={"relative z-30 size-media-icon drop-shadow-media-icon"}
       />

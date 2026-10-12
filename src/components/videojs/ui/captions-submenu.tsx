@@ -70,6 +70,7 @@ export function CaptionsSubmenu({ ...props }: CaptionsSubmenuProps = {}) {
             <MenuChevron />
           </span>
         </Menu.Trigger>
+        {/* Layer nested menu panels above their parent during the slide. */}
         <Menu.Content
           className={cn(
             "[anchor-scope:--media-menu-item-highlight-anchor]",
@@ -154,6 +155,7 @@ function NativeCaptionsSubmenu({ ...props }: CaptionsSubmenuProps = {}) {
             <MenuChevron />
           </span>
         </Menu.Trigger>
+        {/* Layer nested menu panels above their parent during the slide. */}
         <Menu.Content
           className={cn(
             "[anchor-scope:--media-menu-item-highlight-anchor]",

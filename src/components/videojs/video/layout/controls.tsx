@@ -1,3 +1,4 @@
+import type { ControlsVisibility } from "@videojs/core"
 import { Controls, Time, Tooltip } from "@videojs/react"
 import type { ComponentProps } from "react"
 
@@ -18,13 +19,18 @@ export interface DefaultVideoControlsProps {
   renderThumbnail?: NonNullable<
     ComponentProps<typeof TimeSlider>
   >["renderThumbnail"]
+  /** "always" pins the control bar visible — used by the marketing demo,
+   * where there is no media interaction to wake it. */
+  visibility?: ControlsVisibility
 }
 
 export function DefaultVideoControls({
   renderThumbnail,
+  visibility,
 }: DefaultVideoControlsProps = {}) {
   return (
-    <Controls.Root>
+    <Controls.Root visibility={visibility}>
+      {/* The scrim overlays video; controls use the higher layer to stay clear and clickable. */}
       <Controls.Backdrop
         className={cn(
           "pointer-events-none absolute inset-0 z-10 rounded-[inherit] bg-(image:--media-controls-gradient)",

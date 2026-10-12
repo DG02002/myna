@@ -103,6 +103,7 @@ export function SubtitleOverlay({
   }
 
   return (
+    // Keep rendered subtitles over the video and below the player controls.
     <div className="pointer-events-none absolute inset-x-4 bottom-20 z-20 text-center">
       <span className="inline-block max-w-full rounded-sm bg-black/75 px-2 py-1 text-base leading-snug whitespace-pre-line text-white shadow-sm">
         {subtitleCueDisplayText(activeCue.text)}

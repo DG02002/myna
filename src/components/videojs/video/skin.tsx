@@ -1,6 +1,7 @@
 "use client"
 
 import "../styles/video/base.css"
+import type { ControlsVisibility } from "@videojs/core"
 import type { ComponentProps, ReactNode } from "react"
 
 import { BufferingIndicator } from "#/components/videojs/ui/buffering-indicator.tsx"
@@ -24,6 +25,8 @@ export interface VideoSkinProps extends Omit<
   renderThumbnail?: NonNullable<
     ComponentProps<typeof DefaultVideoControls>
   >["renderThumbnail"]
+  /** Passed through to the control bar; "always" pins it visible. */
+  controlsVisibility?: ControlsVisibility
 }
 
 export function VideoSkin({
@@ -31,6 +34,7 @@ export function VideoSkin({
   className,
   renderPoster,
   renderThumbnail,
+  controlsVisibility,
   ...props
 }: VideoSkinProps = {}) {
   return (
@@ -49,7 +53,10 @@ export function VideoSkin({
       <ErrorDialog />
       <Title />
 
-      <DefaultVideoControls renderThumbnail={renderThumbnail} />
+      <DefaultVideoControls
+        renderThumbnail={renderThumbnail}
+        visibility={controlsVisibility}
+      />
 
       <VideoHotkeys />
       <VideoGestures />

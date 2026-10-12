@@ -13,12 +13,14 @@ import { MediabunnyMediaAdapter } from "#/media/engines/mediabunny-adapter"
 import {
   createMatroskaSubtitleReader,
   type MatroskaAssTrackStream,
+  type MatroskaSubtitleReadProgress,
   type MatroskaSubtitleReader,
 } from "#/media/matroska-subtitles"
 import { PgsSubtitleSession } from "#/media/pgs-subtitle-session"
 import {
   loadSubtitleCues,
   subtitleTrackName,
+  type SubtitleLoadProgress,
   type SubtitleTrack,
 } from "#/media/subtitles"
 
@@ -220,7 +222,7 @@ function releaseSelectedSubtitle(
       (track.status === "ready" || track.status === "incomplete")
 
     return selectedLoadWasCancelled || completedAssTrackWasReleased
-      ? { ...track, status: "available" }
+      ? { ...track, status: "available", loadProgress: undefined }
       : track
   })
 }
@@ -230,11 +232,13 @@ function updateEmbeddedSubtitleTrack({
   id,
   status,
   cues,
+  loadProgress,
 }: {
   setTracks: SetSubtitleTracks
   id: string
   status: SubtitleTrack["status"]
   cues?: SubtitleTrack["cues"]
+  loadProgress?: SubtitleLoadProgress
 }): void {
   setTracks((currentTracks) =>
     currentTracks.map((track) => {
@@ -242,11 +246,15 @@ function updateEmbeddedSubtitleTrack({
         return track
       }
 
-      const updatedTrack = { ...track, status }
+      const updatedTrack: SubtitleTrack = { ...track, status }
 
       if (cues !== undefined) {
         updatedTrack.cues = cues
       }
+
+      // Terminal statuses carry no progress; assigning (not spreading)
+      // keeps the field in sync either way.
+      updatedTrack.loadProgress = loadProgress
 
       return updatedTrack
     })
@@ -277,15 +285,46 @@ async function loadEmbeddedAssSubtitleContent({
   setAssTrackStream: SetAssTrackStream
   setAssTrackStreamId: SetAssTrackStreamId
 }): Promise<void> {
-  const stream = reader.streamAssTrack(trackNumber, signal)
+  let readProgress: MatroskaSubtitleReadProgress | null = null
+  let lastProgressAtMs = 0
+
+  const stream = reader.streamAssTrack(trackNumber, signal, (progress) => {
+    readProgress = progress
+    const now = performance.now()
+
+    if (
+      now - lastProgressAtMs >= 250 ||
+      progress.completed === progress.total
+    ) {
+      lastProgressAtMs = now
+      updateEmbeddedSubtitleTrack({
+        setTracks,
+        id: track.id,
+        status: "loading",
+        loadProgress: { kind: "steps", ...progress },
+      })
+    }
+  })
 
   setAssTrackStream(stream)
   setAssTrackStreamId(track.id)
 
   let hasPackets = false
+  let cuesLoaded = 0
 
   const unsubscribePackets = stream.subscribePackets((packets) => {
     hasPackets ||= packets.length > 0
+    cuesLoaded += packets.length
+
+    updateEmbeddedSubtitleTrack({
+      setTracks,
+      id: track.id,
+      status: "loading",
+      loadProgress:
+        readProgress === null
+          ? { kind: "cues", cuesLoaded }
+          : { kind: "steps", ...readProgress },
+    })
   })
 
   try {
@@ -358,7 +397,28 @@ async function loadEmbeddedUtf8SubtitleContent(
     return
   }
 
-  const cues = await reader.readCues(track.source.trackNumber, signal)
+  let lastProgressAtMs = 0
+
+  const cues = await reader.readCues(
+    track.source.trackNumber,
+    signal,
+    (progress) => {
+      const now = performance.now()
+
+      if (
+        now - lastProgressAtMs >= 250 ||
+        progress.completed === progress.total
+      ) {
+        lastProgressAtMs = now
+        updateEmbeddedSubtitleTrack({
+          setTracks,
+          id: track.id,
+          status: "loading",
+          loadProgress: { kind: "steps", ...progress },
+        })
+      }
+    }
+  )
 
   if (!signal.aborted) {
     updateEmbeddedSubtitleTrack({
@@ -571,7 +631,23 @@ export function useSubtitles({
         },
       ])
 
-      void loadSubtitleCues(url, controller.signal)
+      void loadSubtitleCues(url, controller.signal, (progress) => {
+        setTracks((currentTracks) =>
+          currentTracks.map((track) =>
+            track.id === id
+              ? {
+                  ...track,
+                  status: "loading",
+                  loadProgress: {
+                    kind: "bytes",
+                    loadedBytes: progress.loadedBytes,
+                    totalBytes: progress.totalBytes,
+                  },
+                }
+              : track
+          )
+        )
+      })
         .then((result) => {
           if (controller.signal.aborted || "aborted" in result) {
             return
@@ -584,10 +660,15 @@ export function useSubtitles({
               }
 
               if ("cues" in result) {
-                return { ...track, status: "ready", cues: result.cues }
+                return {
+                  ...track,
+                  status: "ready",
+                  cues: result.cues,
+                  loadProgress: undefined,
+                }
               }
 
-              return { ...track, status: "failed" }
+              return { ...track, status: "failed", loadProgress: undefined }
             })
           )
         })
@@ -595,7 +676,9 @@ export function useSubtitles({
           if (!controller.signal.aborted) {
             setTracks((currentTracks) =>
               currentTracks.map((track) =>
-                track.id === id ? { ...track, status: "failed" } : track
+                track.id === id
+                  ? { ...track, status: "failed", loadProgress: undefined }
+                  : track
               )
             )
           }
@@ -619,7 +702,9 @@ export function useSubtitles({
 
       setTracks((currentTracks) =>
         currentTracks.map((track) =>
-          track.id === id ? { ...track, status: "failed" } : track
+          track.id === id
+            ? { ...track, status: "failed", loadProgress: undefined }
+            : track
         )
       )
       setAssTrackStream(null)
@@ -1094,7 +1179,9 @@ function setSubtitleFailed(
   // The effect reports failures from the external TextTrack API.
   setTracks((currentTracks) =>
     currentTracks.map((track) =>
-      track.id === id ? { ...track, status: "failed" } : track
+      track.id === id
+        ? { ...track, status: "failed", loadProgress: undefined }
+        : track
     )
   )
 }

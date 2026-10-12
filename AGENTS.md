@@ -65,9 +65,12 @@ loudly and get a human sign-off before breaking it.
   rate, and selected tracks. Switching audio tracks must not restart playback.
 - In the advanced engine, the audio context clock is the single playback
   clock; video rendering follows it.
-- Media URLs can carry credentials (`?token=`, `?expiry=`, `?mac=`). Never log
-  them, put them in analytics, titles, or shareable app URLs. The entered URL
-  lives in client state; `sessionStorage` only for `/` → `/watch` navigation.
+- Media URLs can carry credentials (`?token=`, `?expiry=`, `?mac=`). Keep them
+  out of logs, analytics, and titles. Same-browser history uses
+  `/watch?itemId=<opaque-id>` and stores the source URL in `localStorage`. A
+  user-initiated share link may carry the source in `/watch#url=<encoded-url>`;
+  anyone with that link can inspect and reuse it. Resolve shared fragments on
+  the client so the source never reaches the Worker request or remote storage.
 - All media initialization happens on the client in `/watch`. Server loaders
   never fetch media.
 - No global COOP/COEP — cross-origin media loading is the core use case.
@@ -178,7 +181,8 @@ code.
 
 ## Where code lives
 
-- `src/routes/` - `__root`, `/` (URL entry), `/watch` (player). Stable
+- `src/routes/` - `__root`, `/` (marketing), `/app` (URL entry + local
+  history), `/watch` (player). Stable
   TanStack Start has no file-based API routes; `src/worker.ts` is the
   Cloudflare Worker entry (wrangler `main`) that wraps TanStack's handler and
   serves `/api/media-proxy` from `src/media/proxy/` before framework routing.

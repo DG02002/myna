@@ -381,6 +381,7 @@ export function AssSubtitleOverlay({
   }, [adapter, engine, nativeVideo, stream, trackId, useAdvancedEngine])
 
   return (
+    // Captions overlay the video and remain below the player controls.
     <div
       className="pointer-events-none absolute inset-0 z-20 [[data-controls-visible]_&]:-translate-y-1/8"
       aria-hidden="true"

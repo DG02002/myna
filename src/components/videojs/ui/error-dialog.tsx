@@ -31,6 +31,7 @@ export function ErrorDialog() {
   const copy = usePlaybackErrorCopy()
 
   return (
+    // The recovery dialog must cover controls while the error is unresolved.
     <ErrorDialogPrimitive.Root>
       <ErrorDialogPrimitive.Backdrop
         className={cn(

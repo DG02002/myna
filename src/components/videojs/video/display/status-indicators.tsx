@@ -18,6 +18,7 @@ export function VideoStatusIndicators({
   return (
     <>
       <StatusAnnouncer />
+      {/* Status sits above video but below the control bars. */}
       <div
         className={cn(
           "pointer-events-none absolute inset-0 z-20 grid grid-cols-3 items-center justify-items-center",
