@@ -1,4 +1,10 @@
-# [![MYNA](public/wordmarks/cinema-delta.svg)](https://myna.dg02002.workers.dev/)
+<!-- markdownlint-disable MD033 MD041 -->
+<p align="center">
+  <a href="https://myna.dg02002.workers.dev/">
+    <img src="public/wordmarks/cinema-delta.svg" alt="MYNA" width="280" />
+  </a>
+</p>
+<!-- markdownlint-enable MD033 MD041 -->
 
 Myna is a browser media player. Paste a direct media URL and it plays
 immediately — MP4, WebM, MKV, HEVC, HLS, multi-track audio. The browser's
