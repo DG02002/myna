@@ -96,20 +96,20 @@ export function AppPage() {
     play(value)
   }
 
-  const readClipboard = useCallback(async (showEmptyMessage: boolean) => {
+  const readClipboard = useCallback(async (showError: boolean) => {
     setClipboardMessage(null)
 
     if (!navigator.clipboard?.readText) {
-      if (showEmptyMessage) {
+      if (showError) {
         setClipboardMessage(
           "Clipboard access isn't available here. Paste a media URL into the field instead."
         )
       }
 
-      return
+      return false
     }
 
-    if (showEmptyMessage) {
+    if (showError) {
       setReadingClipboard(true)
     }
 
@@ -120,16 +120,19 @@ export function AppPage() {
       setClipboardPermission("granted")
       setClipboardSuggestion(url === currentValue ? null : url)
 
-      if (showEmptyMessage && url === null) {
-        setClipboardMessage("No web link found in the clipboard.")
-      }
+      return true
     } catch {
       setClipboardSuggestion(null)
-      setClipboardMessage(
-        "Clipboard access was blocked. Paste a media URL into the field instead."
-      )
+
+      if (showError) {
+        setClipboardMessage(
+          "Clipboard access was blocked. Paste a media URL into the field instead."
+        )
+      }
+
+      return false
     } finally {
-      if (showEmptyMessage) {
+      if (showError) {
         setReadingClipboard(false)
       }
     }
@@ -284,7 +287,11 @@ export function AppPage() {
                     title="Enable clipboard suggestions"
                     onClick={checkClipboard}
                   >
-                    <ClipboardAccessIcon className="size-6" />
+                    <ClipboardAccessIcon
+                      key={clipboardSuggestion ?? "idle"}
+                      className="size-6"
+                      shimmerVisible
+                    />
                   </InputGroupButton>
                 ) : null}
                 <InputGroupButton

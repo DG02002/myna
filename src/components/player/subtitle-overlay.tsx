@@ -18,7 +18,11 @@ export function SubtitleOverlay({
   track: SubtitleTrack | undefined
 }) {
   const cues = useMemo(() => {
-    if (track?.status !== "ready") {
+    if (
+      track === undefined ||
+      track.status === "available" ||
+      track.status === "failed"
+    ) {
       return []
     }
 
@@ -92,7 +96,19 @@ export function SubtitleOverlay({
     }
   }, [adapter, cues, engine])
 
-  if (track?.status !== "ready") {
+  if (
+    track === undefined ||
+    track.status === "available" ||
+    track.status === "failed"
+  ) {
+    return null
+  }
+
+  if (
+    track.coverage !== undefined &&
+    (engine.currentTime < track.coverage.startTime ||
+      engine.currentTime >= track.coverage.endTime)
+  ) {
     return null
   }
 

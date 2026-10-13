@@ -29,6 +29,20 @@ export interface SubtitleTrack {
       }
   status: "loading" | "available" | "ready" | "incomplete" | "failed"
   cues: SubtitleCue[]
+  coverage?: { startTime: number; endTime: number }
+  failure?: {
+    kind:
+      | "unreachable"
+      | "http"
+      | "invalid"
+      | "unsupported"
+      | "limit"
+      | "range"
+      | "decode"
+      | "timeout"
+    status?: number
+    retryAfterMs?: number | null
+  }
   // Present only while status is "loading"; drives the progress readout.
   loadProgress?: SubtitleLoadProgress
 }
@@ -159,7 +173,7 @@ export function parseSubtitleCues(content: string): SubtitleCue[] {
     }
   }
 
-  return cues
+  return cues.toSorted((left, right) => left.startTime - right.startTime)
 }
 
 // Cue text for the advanced-engine overlay: VTTCue markup and entities do

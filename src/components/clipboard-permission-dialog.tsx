@@ -12,7 +12,7 @@ import { cn } from "#/lib/utils"
 interface ClipboardPermissionDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onAllow: () => Promise<void>
+  onAllow: () => Promise<boolean>
 }
 
 export function ClipboardPermissionDialog({
@@ -22,6 +22,7 @@ export function ClipboardPermissionDialog({
 }: ClipboardPermissionDialogProps) {
   const [carouselStep, setCarouselStep] = useState(0)
   const [isAllowing, setIsAllowing] = useState(false)
+  const [allowFailed, setAllowFailed] = useState(false)
   const cancelRef = useRef<HTMLButtonElement>(null)
   const step = open ? carouselStep : 0
 
@@ -30,27 +31,45 @@ export function ClipboardPermissionDialog({
       return undefined
     }
 
-    const interval = window.setInterval(
-      () => setCarouselStep((current) => (current + 1) % 3),
-      1900
-    )
+    const interval = window.setInterval(() => {
+      setCarouselStep((current) => (current + 1) % 3)
+    }, 1500)
 
     return () => window.clearInterval(interval)
   }, [open])
 
   const handleAllow = async () => {
     setIsAllowing(true)
+    setAllowFailed(false)
 
     try {
-      await onAllow()
-      onOpenChange(false)
+      if (await onAllow()) {
+        onOpenChange(false)
+      } else {
+        setAllowFailed(true)
+      }
+    } catch {
+      setAllowFailed(true)
     } finally {
       setIsAllowing(false)
     }
   }
 
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (isAllowing && !nextOpen) {
+      return
+    }
+
+    if (nextOpen) {
+      setCarouselStep(0)
+      setAllowFailed(false)
+    }
+
+    onOpenChange(nextOpen)
+  }
+
   return (
-    <AlertDialog.Root open={open} onOpenChange={onOpenChange}>
+    <AlertDialog.Root open={open} onOpenChange={handleDialogOpenChange}>
       {/* Keep this app-level dialog above page and player controls. */}
       <AlertDialog.Portal>
         <AlertDialog.Overlay className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm" />
@@ -114,7 +133,7 @@ export function ClipboardPermissionDialog({
           </div>
 
           <div className="flex flex-col items-center px-10 pt-6 pb-10 text-center">
-            <ClipboardAccessIcon className="size-12" />
+            <ClipboardAccessIcon className="size-12" shimmerVisible={open} />
             <AlertDialog.Title className="mt-4 w-full text-2xl leading-tight font-normal sm:text-3xl">
               Paste links faster
             </AlertDialog.Title>
@@ -124,15 +143,13 @@ export function ClipboardPermissionDialog({
             </AlertDialog.Description>
 
             <div className="myna-clipboard-dialog-actions mt-8 flex w-full flex-col gap-3">
-              <AlertDialog.Action asChild>
-                <Button
-                  size="lg"
-                  disabled={isAllowing}
-                  onClick={() => void handleAllow()}
-                >
-                  Allow clipboard access
-                </Button>
-              </AlertDialog.Action>
+              <Button
+                size="lg"
+                disabled={isAllowing}
+                onClick={() => void handleAllow()}
+              >
+                {isAllowing ? "Checking access…" : "Allow clipboard access"}
+              </Button>
               <AlertDialog.Cancel asChild>
                 <Button
                   ref={cancelRef}
@@ -144,6 +161,12 @@ export function ClipboardPermissionDialog({
                 </Button>
               </AlertDialog.Cancel>
             </div>
+            {allowFailed ? (
+              <p className="mt-4 text-sm text-destructive" role="alert">
+                Clipboard access was blocked. Paste a media URL into the field
+                instead.
+              </p>
+            ) : null}
           </div>
         </AlertDialog.Content>
       </AlertDialog.Portal>
@@ -151,9 +174,18 @@ export function ClipboardPermissionDialog({
   )
 }
 
-export function ClipboardAccessIcon({ className }: { className?: string }) {
+export function ClipboardAccessIcon({
+  className,
+  shimmerVisible,
+}: {
+  className?: string
+  shimmerVisible: boolean
+}) {
   return (
-    <span className={cn("relative inline-flex text-primary/25", className)}>
+    <span
+      data-shimmer-visible={shimmerVisible}
+      className={cn("relative inline-flex text-primary/25", className)}
+    >
       <HugeiconsIcon
         icon={AiContentGenerator01Icon}
         strokeWidth={1.5}

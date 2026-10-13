@@ -1,4 +1,5 @@
 import type { HlsJsAdapter } from "@videojs/hlsjs-video"
+import { SpinnerIcon as SpinnerIconPrimitive } from "@videojs/react/icons"
 import type { HlsJsVideo } from "@videojs/react/media/hlsjs-video"
 import { VideoPlayer, Video } from "@videojs/react/video"
 import {
@@ -43,8 +44,17 @@ import {
   isMatroskaUrl,
   type PlaybackSource,
 } from "#/media/models/source"
-import { probeSource, type ProbeResult } from "#/media/probe/metadata-probe"
+import {
+  probeSource,
+  type ProbeFailure,
+  type ProbeReadMode,
+  type ProbeResult,
+} from "#/media/probe/metadata-probe"
 import { probeTrackLabel } from "#/media/probe/track-labels"
+import {
+  AdvancedMediaReadError,
+  AdvancedMediaReadPolicy,
+} from "#/media/read-policy"
 import type { SubtitleTrack } from "#/media/subtitles"
 
 type HlsJsVideoComponent = typeof HlsJsVideo
@@ -71,7 +81,7 @@ export type PlaybackEngineMode = "native" | "mediabunny"
 export type ProbeState =
   | { status: "loading" }
   | { status: "ready"; result: ProbeResult }
-  | { status: "failed" }
+  | { status: "failed"; failure: ProbeFailure | null }
 
 interface MigrationSnapshot {
   time: number
@@ -86,8 +96,13 @@ interface MigrationSnapshot {
 export interface PlaybackStageDetails {
   mediaElement: HTMLVideoElement | null
   engine: MediabunnyEngine | null
+  probeResult: ProbeResult | null
+  probeFailure: ProbeFailure | null
+  requestedResumeSeconds: number
+  confirmedResumeSeconds: number
   subtitleTracks: SubtitleTrack[]
   addSubtitle: (url: string) => void
+  retrySubtitle: (id: string) => void
   canAddSubtitles: boolean
   embeddedProbeFailed: boolean
 }
@@ -767,6 +782,61 @@ function usePlaybackPositionTracking({
   }
 }
 
+type AdvancedPreparationStatus = "preparing" | "prepared" | "failed"
+
+function useAdvancedPreparation(
+  engine: MediabunnyEngine | null
+): AdvancedPreparationStatus | null {
+  const [state, setState] = useState<{
+    engine: MediabunnyEngine
+    status: AdvancedPreparationStatus
+  } | null>(null)
+
+  useEffect(() => {
+    if (engine === null) {
+      return undefined
+    }
+
+    return engine.listen((event) => {
+      if (event.type === "preparing" || event.type === "waiting") {
+        setState({ engine, status: "preparing" })
+      } else if (
+        event.type === "prepared" ||
+        event.type === "playing" ||
+        event.type === "seekfailed"
+      ) {
+        setState({ engine, status: "prepared" })
+      } else if (event.type === "error") {
+        setState({ engine, status: "failed" })
+      }
+    })
+  }, [engine])
+
+  if (engine === null) {
+    return null
+  }
+
+  return state?.engine === engine ? state.status : "preparing"
+}
+
+function usePlaybackEngineState() {
+  const [mode, setMode] = useState<PlaybackEngineMode>("native")
+  const [snapshot, setSnapshot] = useState<MigrationSnapshot | null>(null)
+  const [engine, setEngine] = useState<MediabunnyEngine | null>(null)
+  const [adapter, setAdapter] = useState<MediabunnyMediaAdapter | null>(null)
+
+  return {
+    mode,
+    setMode,
+    snapshot,
+    setSnapshot,
+    engine,
+    setEngine,
+    adapter,
+    setAdapter,
+  }
+}
+
 // The native engine wins until it cannot do the job: a fatal native error,
 // or an audio track request the browser cannot serve. Migration preserves
 // position, play state, volume, mute, and rate. The stage is keyed by the
@@ -774,6 +844,7 @@ function usePlaybackPositionTracking({
 export function PlaybackStage({
   source,
   startTimeSeconds,
+  onRetryPlayback,
   onProbe,
   onModeChange,
   onPositionChange,
@@ -782,16 +853,25 @@ export function PlaybackStage({
 }: {
   source: PlaybackSource
   startTimeSeconds: number
+  onRetryPlayback?: () => void
   onProbe: (state: ProbeState) => void
   onModeChange: (mode: PlaybackEngineMode) => void
   onPositionChange: (change: PlaybackPositionChange) => void
   renderDetails?: (details: PlaybackStageDetails) => ReactNode
   dependencies?: Partial<PlaybackStageDependencies>
 }) {
-  const [mode, setMode] = useState<PlaybackEngineMode>("native")
-  const [snapshot, setSnapshot] = useState<MigrationSnapshot | null>(null)
-  const [engine, setEngine] = useState<MediabunnyEngine | null>(null)
-  const [adapter, setAdapter] = useState<MediabunnyMediaAdapter | null>(null)
+  const {
+    mode,
+    setMode,
+    snapshot,
+    setSnapshot,
+    engine,
+    setEngine,
+    adapter,
+    setAdapter,
+  } = usePlaybackEngineState()
+
+  const advancedPreparation = useAdvancedPreparation(engine)
 
   const [selectedAudioTrackId, setSelectedAudioTrackId] = useState<
     string | null
@@ -837,6 +917,7 @@ export function PlaybackStage({
     selectedId: selectedSubtitleId,
     selectedTrack: selectedSubtitleTrack,
     addSubtitle,
+    retrySubtitle,
     restoreSelection: restoreSubtitleSelection,
     assTrackStream,
     pgsSession,
@@ -922,6 +1003,8 @@ export function PlaybackStage({
       resumeStatus,
       selectedSubtitleId,
       cancelRecovery,
+      setMode,
+      setSnapshot,
     ]
   )
 
@@ -946,7 +1029,7 @@ export function PlaybackStage({
     let migrationRequested = false
 
     const migrateToContainerDefault = () => {
-      if (migrationRequested || element.paused) {
+      if (migrationRequested) {
         return
       }
 
@@ -964,14 +1047,11 @@ export function PlaybackStage({
     // Browsers can ignore Matroska's default audio flag and Chrome does not
     // expose native track selection here. Use the container's marked track
     // for multitrack Matroska playback instead of leaving that choice to the
-    // browser's default.
-    element.addEventListener("play", migrateToContainerDefault)
-    element.addEventListener("timeupdate", migrateToContainerDefault)
+    // browser's default. Prepare this path as soon as the probe confirms it,
+    // while preserving the native element's paused state.
+    migrateToContainerDefault()
 
-    return () => {
-      element.removeEventListener("play", migrateToContainerDefault)
-      element.removeEventListener("timeupdate", migrateToContainerDefault)
-    }
+    return undefined
   }, [
     audioTracks,
     hlsSource,
@@ -1083,8 +1163,14 @@ export function PlaybackStage({
         <>
           {mode === "native" ? (
             <VideoPlayer key="native">
-              <VideoSkin className="aspect-video w-full">
-                <SubtitlePlaybackStatus track={selectedSubtitleTrack} />
+              <VideoSkin
+                className="aspect-video w-full"
+                onRetryPlayback={onRetryPlayback}
+              >
+                <SubtitlePlaybackStatus
+                  track={selectedSubtitleTrack}
+                  onRetry={retrySubtitle}
+                />
                 {hlsSource ? (
                   <LazyHlsVideo
                     sourceUrl={source.url}
@@ -1137,8 +1223,14 @@ export function PlaybackStage({
             </VideoPlayer>
           ) : (
             <VideoPlayer key="mediabunny">
-              <VideoSkin className="aspect-video w-full">
-                <SubtitlePlaybackStatus track={selectedSubtitleTrack} />
+              <VideoSkin
+                className="aspect-video w-full"
+                onRetryPlayback={onRetryPlayback}
+              >
+                <SubtitlePlaybackStatus
+                  track={selectedSubtitleTrack}
+                  onRetry={retrySubtitle}
+                />
                 <MediabunnyVideo
                   init={engineInit}
                   createEngine={
@@ -1154,6 +1246,9 @@ export function PlaybackStage({
                     setAdapter(nextAdapter)
                   }}
                 />
+                {advancedPreparation === "preparing" ? (
+                  <AdvancedPreparationIndicator />
+                ) : null}
                 {adapter !== null && engine !== null ? (
                   <SubtitleOverlay
                     adapter={adapter}
@@ -1204,14 +1299,39 @@ export function PlaybackStage({
           {renderDetails?.({
             mediaElement: nativeVideoElement,
             engine,
+            probeResult:
+              probeState.status === "ready" ? probeState.result : null,
+            probeFailure:
+              probeState.status === "failed" ? probeState.failure : null,
+            requestedResumeSeconds:
+              engine?.requestedStartTime ?? initialStartTimeSeconds,
+            confirmedResumeSeconds:
+              engine?.confirmedPosition ?? getNativePosition().confirmedTime,
             subtitleTracks,
             addSubtitle,
+            retrySubtitle,
             canAddSubtitles: !hlsSource,
             embeddedProbeFailed,
           })}
         </>
       </SubtitleTracksContext.Provider>
     </AudioTracksContext.Provider>
+  )
+}
+
+function AdvancedPreparationIndicator() {
+  return (
+    <div
+      aria-label="Preparing media"
+      className="pointer-events-none absolute inset-0 z-30 grid place-content-center rounded-media-dialog bg-media-backdrop/35 text-media-controls-foreground backdrop-filter-media-indicator"
+      role="status"
+    >
+      <SpinnerIconPrimitive
+        aria-hidden="true"
+        className="size-media-icon drop-shadow-media-icon"
+      />
+      <span className="sr-only">Preparing media</span>
+    </div>
   )
 }
 
@@ -1232,7 +1352,7 @@ function useSourceProbe(
   sourceProbe: typeof probeSource
 ): ProbeState {
   const [probeState, setProbeState] = useState<ProbeState>(() =>
-    hlsSource ? { status: "failed" } : { status: "loading" }
+    hlsSource ? { status: "failed", failure: null } : { status: "loading" }
   )
 
   useEffect(() => {
@@ -1241,15 +1361,49 @@ function useSourceProbe(
     }
 
     const controller = new AbortController()
+    const diagnostics: ProbeFailure["diagnostics"] = []
+    let readMode: ProbeReadMode | null = "direct"
 
-    sourceProbe(source, controller.signal)
+    const readPolicy = new AdvancedMediaReadPolicy({
+      onDiagnostic: (diagnostic) => {
+        if (diagnostics.length === 100) {
+          diagnostics.shift()
+        }
+
+        diagnostics.push(diagnostic)
+      },
+    })
+
+    sourceProbe(source, controller.signal, {
+      readPolicy,
+      onReadMode: (mode) => {
+        readMode = mode
+      },
+    })
       .then((result) => {
         setProbeState({ status: "ready", result })
       })
-      .catch(() => {
+      .catch((error: Error) => {
         // Probe failures are informational only; playback is unaffected.
         if (!controller.signal.aborted) {
-          setProbeState({ status: "failed" })
+          const readError = findAdvancedMediaReadError(error)
+          const lastDiagnostic = diagnostics.at(-1)
+
+          setProbeState({
+            status: "failed",
+            failure: {
+              kind: readError?.kind ?? lastDiagnostic?.kind ?? "unknown",
+              status: readError?.status ?? lastDiagnostic?.status ?? null,
+              retryAfterMs:
+                readError?.retryAfterMs ?? lastDiagnostic?.retryAfterMs ?? null,
+              readMode,
+              attempts: diagnostics.reduce(
+                (largest, diagnostic) => Math.max(largest, diagnostic.attempt),
+                0
+              ),
+              diagnostics: [...diagnostics],
+            },
+          })
         }
       })
 
@@ -1257,6 +1411,25 @@ function useSourceProbe(
   }, [source, hlsSource, sourceProbe])
 
   return probeState
+}
+
+function findAdvancedMediaReadError(
+  error: Error
+): AdvancedMediaReadError | null {
+  let current: Error | null = error
+  const seen = new Set<Error>()
+
+  while (current instanceof Error && !seen.has(current)) {
+    if (current instanceof AdvancedMediaReadError) {
+      return current
+    }
+
+    seen.add(current)
+    const causeValue: unknown = current.cause
+    current = causeValue instanceof Error ? causeValue : null
+  }
+
+  return null
 }
 
 function findMatroskaUrl(

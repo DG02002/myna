@@ -33,6 +33,7 @@ import {
 } from "#/components/player/playback-stage"
 import { SubtitleControls } from "#/components/player/subtitle-controls"
 import { Button } from "#/components/ui/button"
+import { Skeleton } from "#/components/ui/skeleton"
 import { filenameFromUrl } from "#/lib/utils"
 import {
   loadHistory,
@@ -242,11 +243,103 @@ function usePlaybackPositionWriter(sourceUrl: string | null) {
   )
 }
 
+function useSourceFileDetails(
+  sourceUrl: string | null,
+  historyEntry: HistoryEntry | null | undefined
+) {
+  const [fileDetailsFor, setFileDetailsFor] = useState<{
+    url: string
+    details: FileDetails
+  } | null>(null)
+
+  const [fileDetailsSettledFor, setFileDetailsSettledFor] = useState<
+    string | null
+  >(null)
+
+  useEffect(() => {
+    if (sourceUrl === null) {
+      return undefined
+    }
+
+    // Record the visit before probing so a quick departure still keeps history.
+    recordPlayedUrl(sourceUrl)
+
+    if (fileDetailsCache.has(sourceUrl)) {
+      return undefined
+    }
+
+    const controller = new AbortController()
+
+    void (async () => {
+      try {
+        const details = await probeFileDetails(
+          { kind: "direct", url: sourceUrl },
+          controller.signal
+        )
+
+        if (controller.signal.aborted) {
+          return
+        }
+
+        if (details !== null) {
+          cacheFileDetails(sourceUrl, details)
+          startTransition(() => {
+            setFileDetailsFor({ url: sourceUrl, details })
+          })
+          updateHistoryEntry(sourceUrl, details)
+        }
+      } catch {
+        // The URL-derived name is the safe fallback when headers cannot be read.
+      } finally {
+        if (!controller.signal.aborted) {
+          setFileDetailsSettledFor(sourceUrl)
+        }
+      }
+    })()
+
+    return () => controller.abort()
+  }, [sourceUrl])
+
+  let fileDetails: FileDetails | null = null
+
+  if (fileDetailsFor !== null && fileDetailsFor.url === sourceUrl) {
+    fileDetails = fileDetailsFor.details
+  } else if (sourceUrl !== null) {
+    fileDetails = fileDetailsCache.get(sourceUrl) ?? null
+  }
+
+  const cachedFilename =
+    fileDetails?.filename ??
+    (historyEntry?.filenameConfirmed ? historyEntry.filename : null)
+
+  const filenamePending =
+    sourceUrl !== null &&
+    cachedFilename === null &&
+    fileDetailsSettledFor !== sourceUrl
+
+  const settledFilename =
+    fileDetailsSettledFor === sourceUrl ? historyEntry?.filename : null
+
+  const filename =
+    cachedFilename ??
+    settledFilename ??
+    (sourceUrl === null ? "" : filenameFromUrl(sourceUrl))
+
+  return { filename, filenamePending, fileDetails }
+}
+
 function WatchPage() {
   const { itemId } = Route.useSearch()
 
   const { source, historyEntry, invalidShareLink } =
     useResolvedWatchSource(itemId)
+
+  const sourceUrl = source === null || source === undefined ? null : source.url
+
+  const { filename, filenamePending, fileDetails } = useSourceFileDetails(
+    sourceUrl,
+    historyEntry
+  )
 
   const [probeState, setProbeState] = useState<ProbeState>({
     status: "loading",
@@ -254,13 +347,13 @@ function WatchPage() {
 
   const [engineMode, setEngineMode] = useState<PlaybackEngineMode>("native")
   const [bugReportOpen, setBugReportOpen] = useState(false)
+  const [playbackAttempt, setPlaybackAttempt] = useState(0)
 
-  // Details are stored per-URL so a source switch invalidates the previous
-  // file's data by comparison instead of a reset render.
-  const [fileDetailsFor, setFileDetailsFor] = useState<{
-    url: string
-    details: FileDetails
-  } | null>(null)
+  const retryPlayback = useCallback(() => {
+    setProbeState({ status: "loading" })
+    setEngineMode("native")
+    setPlaybackAttempt((attempt) => attempt + 1)
+  }, [])
 
   const onProbe = useCallback((state: ProbeState) => {
     startTransition(() => {
@@ -274,42 +367,8 @@ function WatchPage() {
     })
   }, [])
 
-  const sourceUrl = source === null || source === undefined ? null : source.url
   const { activeTool, setActiveTool } = useSourceScopedPlayerTool(sourceUrl)
   const onPositionChange = usePlaybackPositionWriter(sourceUrl)
-
-  useEffect(() => {
-    if (sourceUrl === null) {
-      return undefined
-    }
-
-    // The local history entry is written before any probing so a quick visit
-    // still records the link; the header probe fills in name and size.
-    recordPlayedUrl(sourceUrl)
-
-    if (fileDetailsCache.has(sourceUrl)) {
-      return undefined
-    }
-
-    const controller = new AbortController()
-
-    void probeFileDetails(
-      { kind: "direct", url: sourceUrl },
-      controller.signal
-    ).then((details) => {
-      if (controller.signal.aborted || details === null) {
-        return
-      }
-
-      cacheFileDetails(sourceUrl, details)
-      startTransition(() => {
-        setFileDetailsFor({ url: sourceUrl, details })
-      })
-      updateHistoryEntry(sourceUrl, details)
-    })
-
-    return () => controller.abort()
-  }, [sourceUrl])
 
   if (source === undefined || (source !== null && historyEntry === undefined)) {
     return (
@@ -339,16 +398,6 @@ function WatchPage() {
     )
   }
 
-  const fileDetails =
-    fileDetailsFor !== null && fileDetailsFor.url === source.url
-      ? fileDetailsFor.details
-      : (fileDetailsCache.get(source.url) ?? null)
-
-  const filename =
-    fileDetails?.filename ??
-    historyEntry?.filename ??
-    filenameFromUrl(source.url)
-
   return (
     <main className="mx-auto flex w-full max-w-5xl flex-col px-6 py-6 md:px-8 lg:px-8">
       <header className="myna-watch-header mb-5 grid items-center gap-3 sm:gap-4">
@@ -365,27 +414,46 @@ function WatchPage() {
           />
         </Link>
         <div className="min-w-0 space-y-1">
-          <h1
-            className="line-clamp-2 break-all text-xl leading-normal font-medium tracking-tight sm:text-2xl"
-            title={filename}
-          >
-            <bdi>{filename}</bdi>
-          </h1>
+          {filenamePending ? (
+            <div
+              className="flex min-h-16 items-center"
+              aria-busy="true"
+              aria-label="Loading filename"
+            >
+              <span className="sr-only">Loading filename</span>
+              <div className="myna-filename-skeleton h-7 w-3/4 sm:h-8">
+                <Skeleton aria-hidden="true" />
+              </div>
+            </div>
+          ) : (
+            <h1
+              className="line-clamp-2 min-h-16 content-center break-all text-xl leading-normal font-medium tracking-tight sm:text-2xl"
+              title={filename}
+            >
+              <bdi>{filename}</bdi>
+            </h1>
+          )}
         </div>
       </header>
 
       <PlaybackStage
-        key={source.url}
+        key={`${source.url}:${playbackAttempt}`}
         source={source}
         startTimeSeconds={historyEntry?.positionSeconds ?? 0}
+        onRetryPlayback={retryPlayback}
         onProbe={onProbe}
         onModeChange={onModeChange}
         onPositionChange={onPositionChange}
         renderDetails={({
           mediaElement,
           engine,
+          probeResult,
+          probeFailure,
+          requestedResumeSeconds,
+          confirmedResumeSeconds,
           subtitleTracks,
           addSubtitle,
+          retrySubtitle,
           canAddSubtitles,
           embeddedProbeFailed,
         }) => (
@@ -464,6 +532,7 @@ function WatchPage() {
                 <SubtitleControls
                   tracks={subtitleTracks}
                   onAddSubtitle={addSubtitle}
+                  onRetrySubtitle={retrySubtitle}
                   embeddedProbeFailed={embeddedProbeFailed}
                   disabled={!canAddSubtitles}
                 />
@@ -474,6 +543,11 @@ function WatchPage() {
                   engineMode={engineMode}
                   mediaElement={mediaElement}
                   engine={engine}
+                  probeResult={probeResult}
+                  probeFailure={probeFailure}
+                  requestedResumeSeconds={requestedResumeSeconds}
+                  confirmedResumeSeconds={confirmedResumeSeconds}
+                  subtitleTracks={subtitleTracks}
                 />
               </div>
             </div>

@@ -13,7 +13,7 @@
     "preview": "pnpm run build && vite preview",
     "deploy": "pnpm run build && wrangler deploy",
     "cf-typegen": "wrangler types",
-    "test": "vitest run && vitest run --config vitest.player.config.ts && tsx --test src/media/models/confirmed-position.test.ts src/media/models/playback-resume.test.ts src/media/engines/mediabunny-engine.test.ts src/media/subtitles.test.ts src/media/matroska-subtitles.test.ts src/media/pgs-subtitles.test.ts src/media/pgs-subtitle-session.test.ts src/media/pgs-subtitle-worker.test.ts src/components/player/ass-subtitle-overlay.test.ts",
+    "test": "vitest run && vitest run --config vitest.player.config.ts && tsx --test src/media/models/confirmed-position.test.ts src/media/models/playback-resume.test.ts src/media/models/playback-diagnostics.test.ts src/media/engines/mediabunny-engine.test.ts src/media/read-policy.test.ts src/media/subtitles.test.ts src/media/matroska-subtitles.test.ts src/media/pgs-subtitles.test.ts src/media/pgs-subtitle-session.test.ts src/media/pgs-subtitle-worker.test.ts src/components/player/ass-subtitle-overlay.test.ts src/components/player/subtitle-tracks.test.ts",
     "check": "pnpm run fmt:check && pnpm run lint && pnpm run lint:markdown && pnpm run typecheck && pnpm run knip && pnpm run knip:production",
     "lint": "pnpm run cf-typegen && oxlint src scripts vite.config.ts vitest.config.ts vitest.player.config.ts",
     "lint:markdown": "markdownlint-cli2",

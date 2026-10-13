@@ -6,8 +6,24 @@ import type { InputAudioTrack, InputTrack, InputVideoTrack } from "mediabunny"
 
 import type { PlaybackSource } from "../models/source"
 import { proxiedMediaUrl } from "../proxy/proxied-url"
+import {
+  type AdvancedReadDiagnostic,
+  type AdvancedReadFailureKind,
+  AdvancedMediaReadError,
+  AdvancedMediaReadPolicy,
+  isProxyFallbackFailure,
+} from "../read-policy"
 
-type ProbeReadMode = "direct" | "proxy"
+export type ProbeReadMode = "direct" | "proxy"
+
+export interface ProbeFailure {
+  kind: AdvancedReadFailureKind | "unknown"
+  status: number | null
+  retryAfterMs: number | null
+  readMode: ProbeReadMode | null
+  attempts: number
+  diagnostics: AdvancedReadDiagnostic[]
+}
 
 export interface ProbeTrackInfo {
   number: number
@@ -78,7 +94,15 @@ async function describeTrack(
   }
 }
 
-async function readViaUrl(readUrl: string, signal: AbortSignal) {
+async function readViaUrl(
+  readUrl: string,
+  signal: AbortSignal,
+  readPolicy: AdvancedMediaReadPolicy
+) {
+  if (signal.aborted) {
+    throw new AdvancedMediaReadError("aborted")
+  }
+
   const {
     Input,
     UrlSource,
@@ -95,11 +119,15 @@ async function readViaUrl(readUrl: string, signal: AbortSignal) {
 
   const input = new Input({
     formats: [MP4, MATROSKA, WEBM, MP3, WAVE, OGG, ADTS, FLAC, MPEG_TS],
-    source: new UrlSource(readUrl),
+    source: new UrlSource(readUrl, readPolicy.urlSourceOptions),
   })
 
   const disposeFromAbort = () => input.dispose()
   signal.addEventListener("abort", disposeFromAbort, { once: true })
+
+  if (signal.aborted) {
+    input.dispose()
+  }
 
   const deadline = setTimeout(
     () => input.dispose(),
@@ -125,19 +153,41 @@ async function readViaUrl(readUrl: string, signal: AbortSignal) {
   }
 }
 
+interface ProbeSourceOptions {
+  readPolicy?: AdvancedMediaReadPolicy
+  onReadMode?: (mode: ProbeReadMode) => void
+}
+
 export async function probeSource(
   source: PlaybackSource,
-  signal: AbortSignal
+  signal: AbortSignal,
+  options: ProbeSourceOptions = {}
 ): Promise<ProbeResult> {
+  const { readPolicy = new AdvancedMediaReadPolicy(), onReadMode } = options
+
+  onReadMode?.("direct")
+
   try {
-    return { ...(await readViaUrl(source.url, signal)), readMode: "direct" }
+    return {
+      ...(await readViaUrl(source.url, signal, readPolicy)),
+      readMode: "direct",
+    }
   } catch (directError) {
     if (signal.aborted) {
+      throw new AdvancedMediaReadError("aborted")
+    }
+
+    if (
+      !(directError instanceof Error) ||
+      !isProxyFallbackFailure(directError)
+    ) {
       throw directError
     }
 
+    onReadMode?.("proxy")
+
     return {
-      ...(await readViaUrl(proxiedMediaUrl(source.url), signal)),
+      ...(await readViaUrl(proxiedMediaUrl(source.url), signal, readPolicy)),
       readMode: "proxy",
     }
   }
@@ -149,6 +199,12 @@ export interface FileDetails {
 }
 
 const FILE_DETAILS_TIMEOUT_MS = 8_000
+
+interface FileDetailsRequest {
+  displayUrl: string
+  signal: AbortSignal
+  readPolicy: AdvancedMediaReadPolicy
+}
 
 const CONTENT_RANGE_TOTAL = /\/(\d+)$/
 
@@ -269,9 +325,14 @@ function sizeFromResponse(response: Response): number | null {
 // absolute media URL the filename is derived from.
 async function readFileDetails(
   fetchUrl: string,
-  displayUrl: string,
-  signal: AbortSignal
+  request: FileDetailsRequest
 ): Promise<FileDetails | null> {
+  const { displayUrl, signal, readPolicy } = request
+
+  if (signal.aborted) {
+    return null
+  }
+
   const controller = new AbortController()
 
   const abortFromCaller = () => controller.abort()
@@ -281,25 +342,19 @@ async function readFileDetails(
   const deadline = setTimeout(() => controller.abort(), FILE_DETAILS_TIMEOUT_MS)
 
   try {
-    const response = await fetch(fetchUrl, {
+    const response = await readPolicy.fetchWithRetries(fetchUrl, {
       headers: { Range: "bytes=0-0" },
       signal: controller.signal,
     })
 
-    // The one-byte body is worthless; releasing it lets the connection close
-    // instead of lingering until garbage collection.
-    await response.body?.cancel().catch(() => {})
-
-    if (!response.ok) {
-      return null
-    }
+    // The one-byte body is worthless; start cancellation without making the
+    // metadata result depend on an upstream stream's cancel acknowledgement.
+    void response.body?.cancel().catch(() => {})
 
     return {
       filename: filenameFromResponse(new URL(displayUrl), response),
       sizeBytes: sizeFromResponse(response),
     }
-  } catch {
-    return null
   } finally {
     clearTimeout(deadline)
     signal.removeEventListener("abort", abortFromCaller)
@@ -311,34 +366,32 @@ async function readFileDetails(
 // means "no details"; callers fall back to the URL-derived name.
 export async function probeFileDetails(
   source: PlaybackSource,
-  signal: AbortSignal
+  signal: AbortSignal,
+  readPolicy = new AdvancedMediaReadPolicy()
 ): Promise<FileDetails | null> {
-  const direct = await readFileDetails(source.url, source.url, signal)
+  try {
+    return await readFileDetails(source.url, {
+      displayUrl: source.url,
+      signal,
+      readPolicy,
+    })
+  } catch (directError) {
+    if (
+      signal.aborted ||
+      !(directError instanceof Error) ||
+      !isProxyFallbackFailure(directError)
+    ) {
+      return null
+    }
 
-  if (direct !== null && direct.sizeBytes !== null) {
-    return direct
-  }
-
-  if (signal.aborted) {
-    return direct
-  }
-
-  const proxied = await readFileDetails(
-    proxiedMediaUrl(source.url),
-    source.url,
-    signal
-  )
-
-  if (direct === null) {
-    return proxied
-  }
-
-  if (proxied === null) {
-    return direct
-  }
-
-  return {
-    filename: direct.filename,
-    sizeBytes: proxied.sizeBytes ?? direct.sizeBytes,
+    try {
+      return await readFileDetails(proxiedMediaUrl(source.url), {
+        displayUrl: source.url,
+        signal,
+        readPolicy,
+      })
+    } catch {
+      return null
+    }
   }
 }

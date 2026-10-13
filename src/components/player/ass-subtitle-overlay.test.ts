@@ -129,6 +129,7 @@ function createLoadHarness(stream: MatroskaAssTrackStream) {
 
   const reader: MatroskaSubtitleReader = {
     probe: async () => [],
+    streamCues: async function* () {},
     readCues: async () => [],
     streamPgsTrack: async function* () {},
     streamPgsWindow: async function* () {},

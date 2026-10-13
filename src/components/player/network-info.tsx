@@ -7,8 +7,12 @@ import {
 } from "react"
 
 import type { PlaybackEngineMode } from "#/components/player/playback-stage"
+import { Button } from "#/components/ui/button"
 import type { MediabunnyEngine } from "#/media/engines/mediabunny-engine"
+import { createPlaybackDiagnosticSnapshot } from "#/media/models/playback-diagnostics"
 import { isHlsUrl } from "#/media/models/source"
+import type { ProbeFailure, ProbeResult } from "#/media/probe/metadata-probe"
+import type { SubtitleTrack } from "#/media/subtitles"
 
 interface MynaNetworkConnection extends EventTarget {
   readonly downlink: number
@@ -84,14 +88,26 @@ export function NetworkInfo({
   engineMode,
   mediaElement,
   engine,
+  probeResult,
+  probeFailure,
+  requestedResumeSeconds,
+  confirmedResumeSeconds,
+  subtitleTracks,
 }: {
   sourceUrl: string
   engineMode: PlaybackEngineMode
   mediaElement: HTMLVideoElement | null
   engine: MediabunnyEngine | null
+  probeResult: ProbeResult | null
+  probeFailure: ProbeFailure | null
+  requestedResumeSeconds: number
+  confirmedResumeSeconds: number
+  subtitleTracks: SubtitleTrack[]
 }) {
   const readings = useNetworkReadings(sourceUrl)
   const playback = usePlaybackSnapshot(mediaElement, engine)
+  const sessionId = useMemo(() => globalThis.crypto.randomUUID(), [])
+  const [copyMessage, setCopyMessage] = useState("")
 
   const peakMbps = readings.rateSamples.reduce(
     (peak, sample) => Math.max(peak, sample.mbps),
@@ -99,6 +115,37 @@ export function NetworkInfo({
   )
 
   const diagnosis = describeNetworkState(playback, readings, engineMode)
+
+  const copyDiagnostics = async () => {
+    const snapshot = createPlaybackDiagnosticSnapshot({
+      sessionId,
+      engineMode,
+      readMode:
+        engine?.readMode ??
+        (engineMode === "native" ? "native-browser" : "unavailable"),
+      playbackState: playback.state,
+      currentTimeSeconds:
+        engine?.currentTime ?? mediaElement?.currentTime ?? null,
+      requestedResumeSeconds,
+      confirmedResumeSeconds,
+      playbackRate: engine?.playbackRate ?? mediaElement?.playbackRate ?? 1,
+      bufferedAheadSeconds: playback.bufferedAheadSeconds,
+      decodedVideoThroughSeconds: engine?.decodedVideoThroughSeconds ?? null,
+      nativeErrorCode:
+        engine === null ? (mediaElement?.error?.code ?? null) : null,
+      probeResult,
+      probeFailure,
+      subtitleTracks,
+      records: engine?.diagnosticSnapshot ?? [],
+    })
+
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(snapshot, null, 2))
+      setCopyMessage("Playback diagnostics copied.")
+    } catch {
+      setCopyMessage("Clipboard access is unavailable in this browser.")
+    }
+  }
 
   return (
     <section aria-label="Network status" className="space-y-5 text-base">
@@ -138,6 +185,10 @@ export function NetworkInfo({
             label="Origin response"
             value={formatOriginResponse(readings.originResponseMs)}
           />
+          <NetworkReading
+            label="Metadata probe"
+            value={metadataProbeLabel(probeResult, probeFailure)}
+          />
         </dl>
 
         <RateChart
@@ -152,8 +203,36 @@ export function NetworkInfo({
       <p className="text-muted-foreground text-sm leading-relaxed">
         {networkRateCaption(readings, engineMode, peakMbps)}
       </p>
+      <div className="flex flex-wrap items-center gap-3">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => void copyDiagnostics()}
+        >
+          Copy playback diagnostics
+        </Button>
+        <p aria-live="polite" className="text-sm text-muted-foreground">
+          {copyMessage}
+        </p>
+      </div>
     </section>
   )
+}
+
+function metadataProbeLabel(
+  result: ProbeResult | null,
+  failure: ProbeFailure | null
+): string {
+  if (failure !== null) {
+    const mode = failure.readMode === null ? "" : ` · ${failure.readMode}`
+
+    const category =
+      failure.status === null ? failure.kind : `HTTP ${failure.status}`
+
+    return `${category}${mode} · ${failure.attempts} attempts`
+  }
+
+  return result === null ? "Not run" : `Ready · ${result.readMode}`
 }
 
 function networkRateCaption(

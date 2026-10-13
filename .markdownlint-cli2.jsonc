@@ -23,7 +23,9 @@
   ],
   "overrides": [
     {
-      "filter": [".github/**/*.md"],
+      "filter": [
+        ".github/**/*.md"
+      ],
       "config": {
         // PR and issue templates start with sections, not a title.
         "MD041": false

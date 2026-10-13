@@ -359,7 +359,8 @@ function createPublicAudioEngine(
   context: PublicAudioContext,
   audioSink: TestAudioSink,
   createCanvasSink?: MediabunnyEngineDependencies["createCanvasSink"],
-  startTime = 0
+  startTime = 0,
+  videoTrack: InputVideoTrack | null = null
 ): MediabunnyEngine {
   const audioTrack: TestInputAudioTrack = {
     type: "audio",
@@ -369,7 +370,7 @@ function createPublicAudioEngine(
   }
 
   const input = {
-    getPrimaryVideoTrack: async () => null,
+    getPrimaryVideoTrack: async () => videoTrack,
     getAudioTracks: async () => [audioTrack],
     getPrimaryAudioTrack: async () => audioTrack,
     getDurationFromMetadata: async () => 60,
@@ -417,20 +418,88 @@ function createPublicAudioEngine(
   )
 }
 
+function createPublicVideoOnlyEngine(
+  context: PublicAudioContext,
+  createCanvasSink: MediabunnyEngineDependencies["createCanvasSink"],
+  startTime = 0
+): MediabunnyEngine {
+  const input = {
+    getPrimaryVideoTrack: async () => createPublicTestVideoTrack(),
+    getAudioTracks: async () => [],
+    getPrimaryAudioTrack: async () => null,
+    getDurationFromMetadata: async () => 60,
+    computeDuration: async () => 60,
+    dispose: () => {},
+  }
+
+  const injectedContext: unknown = context
+
+  return new MediabunnyEngine(
+    {
+      source: { kind: "direct", url: "https://example.invalid/video-only.mkv" },
+      startTime,
+      autoPlay: false,
+      volume: 1,
+      muted: false,
+      playbackRate: 1,
+      audioTrackId: null,
+    },
+    {
+      createInput: async (_source, attachInput) => {
+        attachInput(input)
+
+        return input
+      },
+      createAudioContext: () => {
+        // SAFETY: The fake exposes every AudioContext member used by this test.
+        return injectedContext as AudioContext
+      },
+      createCanvasSink,
+    }
+  )
+}
+
+function createPublicTestVideoTrack(): InputVideoTrack {
+  // SAFETY: This minimal fake implements the video track methods exercised by the engine tests.
+  const track = Object.create(null) as InputVideoTrack
+
+  Object.assign(track, {
+    type: "video",
+    number: 1,
+    getLanguageCode: async () => "und",
+    getDisplayWidth: async () => 300,
+    getDisplayHeight: async () => 150,
+  })
+
+  return track
+}
+
 function createControlledCanvasReader(): ControlledCanvasReader {
   const requests: PendingCanvasFrame[] = []
   const waiters = new Map<number, Latch>()
 
   const createCanvasSink: MediabunnyEngineDependencies["createCanvasSink"] =
     async () => {
-      const sink = {
-        getCanvas(time: number) {
-          return new Promise<TestCanvasFrame | null>((resolve, reject) => {
-            requests.push({ time, resolve, reject })
-            waiters.get(requests.length - 1)?.release()
-          })
+      const requestFrame = (time: number) =>
+        new Promise<TestCanvasFrame | null>((resolve, reject) => {
+          requests.push({ time, resolve, reject })
+          waiters.get(requests.length - 1)?.release()
+        })
+
+      const sinkWithCanvasLoop = {
+        getCanvas: requestFrame,
+        canvases(startTime: number) {
+          return (async function* () {
+            const frame = await requestFrame(startTime)
+
+            if (frame !== null) {
+              yield frame
+            }
+          })()
         },
-      } satisfies Pick<CanvasSink, "getCanvas">
+      }
+
+      const sink = sinkWithCanvasLoop satisfies Pick<CanvasSink, "getCanvas">
 
       // SAFETY: Paused-seek tests use only getCanvas and return a controlled canvas frame.
       return sink as CanvasSink
@@ -878,14 +947,20 @@ void test("waits for decoded audio and a video frame before starting the clock",
       } as CanvasSink
     }
 
-  const engine = createPublicAudioEngine(context, audioSink, createCanvasSink)
+  const engine = createPublicAudioEngine(
+    context,
+    audioSink,
+    createCanvasSink,
+    0,
+    createPublicTestVideoTrack()
+  )
+
   const events: EngineStateEvent[] = []
   engine.listen((event) => events.push(event))
+  engine.attachCanvas(canvas.createCanvas())
 
   try {
     await engine.load()
-    installFakeVideoTrack(engine)
-    engine.attachCanvas(canvas.createCanvas())
 
     const playTask = engine.play()
     await Promise.all([audioStarted.promise, frameStarted.promise])
@@ -983,32 +1058,25 @@ void test("waits for the video frame covering a paused seek before playing", asy
     installFakeVideoTrack(engine)
     engine.attachCanvas(canvas.createCanvas())
 
-    await engine.seek(20)
+    const seekTask = engine.seek(20)
+    await targetFrameRequested.promise
+
+    assert.equal(engine.currentTime, 20)
+    assert.equal(internals.lastBlittedTimestamp, -1)
+
+    targetFrameReady.release()
+    await seekTask
     assert.equal(engine.currentTime, 20)
     assert.equal(internals.lastBlittedTimestamp, 20)
 
-    const playTask = engine.play()
-
-    const preparationStep = await Promise.race([
-      playTask.then(() => "play-completed" as const),
-      targetFrameRequested.promise.then(
-        () => "target-frame-requested" as const
-      ),
-    ])
-
-    assert.equal(preparationStep, "target-frame-requested")
     context.currentTime = 8
+    await engine.play()
     assert.equal(engine.currentTime, 20)
-    assert.equal(nodes.length, 0)
+    assert.equal(nodes.length, 1)
     assert.equal(
       events.some((event) => event.type === "playing"),
-      false
+      true
     )
-
-    targetFrameReady.release()
-    await playTask
-
-    assert.equal(nodes.length, 1)
     assert.deepEqual(nodes[0]?.startCalls, [{ when: 8 }])
     assert.equal(internals.lastBlittedTimestamp, 20)
     assert.equal(
@@ -1066,17 +1134,17 @@ void test("records a real frame gap and keeps its future frame queued", async ()
     context,
     audioSink,
     createCanvasSink,
-    20
+    20,
+    createPublicTestVideoTrack()
   )
 
   const internals = accessInternals(engine)
   const events: EngineStateEvent[] = []
   engine.listen((event) => events.push(event))
+  engine.attachCanvas(canvas.createCanvas())
 
   try {
     await engine.load()
-    installFakeVideoTrack(engine)
-    engine.attachCanvas(canvas.createCanvas())
 
     await engine.play()
 
@@ -1114,7 +1182,6 @@ void test("ends at duration without announcing playback or scheduling audio", as
   try {
     await engine.load()
     installFakeVideoTrack(engine)
-
     await engine.play()
 
     assert.equal(engine.currentTime, 60)
@@ -1238,12 +1305,6 @@ void test("starts a video-only timeline after its first frame is decoded", async
   const frameRequested = createLatch()
   const frameReady = createLatch()
 
-  const audioSink: TestAudioSink = {
-    async *buffers() {
-      yield* []
-    },
-  }
-
   const createCanvasSink: MediabunnyEngineDependencies["createCanvasSink"] =
     async () => {
       // SAFETY: The test sink implements only the canvases iterator used by playback priming.
@@ -1262,13 +1323,10 @@ void test("starts a video-only timeline after its first frame is decoded", async
       } as CanvasSink
     }
 
-  const engine = createPublicAudioEngine(context, audioSink, createCanvasSink)
-  const internals = accessInternals(engine)
+  const engine = createPublicVideoOnlyEngine(context, createCanvasSink)
 
   try {
     await engine.load()
-    internals.selectedAudioTrack = null
-    installFakeVideoTrack(engine)
     engine.attachCanvas(canvas.createCanvas())
 
     const playTask = engine.play()

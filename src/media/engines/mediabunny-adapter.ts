@@ -1,3 +1,4 @@
+import type { PlaybackFailure } from "../models/media-errors"
 // Video.js media adapter around the Mediabunny engine. Implements the media
 // surface the player store probes (play/pause/seek/volume/rate/errors) and
 // translates engine state events into standard media events. Registered as
@@ -7,6 +8,8 @@ import type { EngineStateEvent, MediabunnyEngine } from "./mediabunny-engine"
 const HAVE_NOTHING = 0
 
 const HAVE_METADATA = 1
+
+const HAVE_CURRENT_DATA = 2
 
 const HAVE_ENOUGH_DATA = 4
 
@@ -24,7 +27,13 @@ const EMPTY_TIME_RANGES: StaticTimeRanges = {
 
 export class MediabunnyMediaAdapter extends EventTarget {
   private readyStateValue: number = HAVE_NOTHING
-  private errorValue: { code: number; message: string } | null = null
+  private hasCurrentData = false
+  private hasDispatchedLoadedData = false
+  private errorValue: {
+    code: number
+    message: string
+    failure?: PlaybackFailure
+  } | null = null
   private readonly textTrackHost = document.createElement("video")
 
   constructor(
@@ -42,10 +51,25 @@ export class MediabunnyMediaAdapter extends EventTarget {
         this.readyStateValue = HAVE_METADATA
         this.dispatch("loadedmetadata")
         this.dispatch("durationchange")
-        this.dispatch("loadeddata")
+        break
+      case "preparing":
+        this.dispatch("waiting")
+        break
+      case "prepared":
+        this.hasCurrentData = true
+        this.readyStateValue = HAVE_CURRENT_DATA
+
+        if (!this.hasDispatchedLoadedData) {
+          this.hasDispatchedLoadedData = true
+          this.dispatch("loadeddata")
+        }
+
+        this.dispatch("timeupdate")
         break
       case "waiting":
-        this.readyStateValue = HAVE_METADATA
+        this.readyStateValue = this.hasCurrentData
+          ? HAVE_CURRENT_DATA
+          : HAVE_METADATA
         this.dispatch("waiting")
         break
       case "playing":
@@ -65,10 +89,17 @@ export class MediabunnyMediaAdapter extends EventTarget {
         break
       case "seekfailed":
         this.dispatch("seekerror")
-        this.dispatch("seeked")
+        this.dispatch("timeupdate")
         break
       case "error":
-        this.errorValue = { code: event.code, message: event.message }
+        this.errorValue =
+          event.failure === undefined
+            ? { code: event.code, message: event.message }
+            : {
+                code: event.code,
+                message: event.message,
+                failure: event.failure,
+              }
         this.dispatch("error")
         break
     }
@@ -162,7 +193,11 @@ export class MediabunnyMediaAdapter extends EventTarget {
     return this.readyStateValue
   }
 
-  get error(): { code: number; message: string } | null {
+  get error(): {
+    code: number
+    message: string
+    failure?: PlaybackFailure
+  } | null {
     return this.errorValue
   }
 

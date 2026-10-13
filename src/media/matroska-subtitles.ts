@@ -45,8 +45,23 @@ export interface MatroskaSubtitleReadProgress {
   total: number
 }
 
+interface MatroskaCueStreamOptions {
+  trackNumber: number
+  targetTime: number
+  signal: AbortSignal
+  onProgress?: (progress: MatroskaSubtitleReadProgress) => void
+}
+
+interface MatroskaAssTrackStreamOptions {
+  trackNumber: number
+  signal: AbortSignal
+  targetTime?: number
+  onProgress?: (progress: MatroskaSubtitleReadProgress) => void
+}
+
 export interface MatroskaSubtitleReader {
   probe(signal: AbortSignal): Promise<MatroskaTextTrack[]>
+  streamCues(options: MatroskaCueStreamOptions): AsyncIterable<SubtitleCue[]>
   readCues(
     trackNumber: number,
     signal: AbortSignal,
@@ -61,11 +76,7 @@ export interface MatroskaSubtitleReader {
     targetTime: number,
     signal: AbortSignal
   ): AsyncIterable<MatroskaPgsWindowEvent>
-  streamAssTrack(
-    trackNumber: number,
-    signal: AbortSignal,
-    onProgress?: (progress: MatroskaSubtitleReadProgress) => void
-  ): MatroskaAssTrackStream
+  streamAssTrack(options: MatroskaAssTrackStreamOptions): MatroskaAssTrackStream
   readAssTrack(
     trackNumber: number,
     signal: AbortSignal
@@ -167,6 +178,7 @@ export type MatroskaSubtitleFailureKind =
   | "http"
   | "invalid"
   | "limit"
+  | "range"
   | "unsupported"
   | "unreachable"
   | "timeout"
@@ -182,6 +194,8 @@ function subtitleErrorMessage(
       return "Embedded subtitle range request timed out."
     case "http":
       return `Subtitle server returned HTTP ${status ?? "an error"}.`
+    case "range":
+      return "Subtitle server returned an invalid byte range."
     default:
       return `Embedded subtitles are ${kind}.`
   }
@@ -506,6 +520,46 @@ const MAX_SUBTITLE_CUES = 50_000
 
 const MAX_SUBTITLE_TEXT_BYTES = 4 * 1024 * 1024
 
+const TEXT_WINDOW_BACKWARD_SECONDS = 30
+
+const TEXT_WINDOW_FORWARD_SECONDS = 30
+
+const ASS_WINDOW_BACKWARD_SECONDS = 180
+
+const MAX_OVERLAP_CUE_CLUSTERS = 1_024
+
+const MAX_ASS_CACHED_WINDOW_BYTES = 24 * 1024 * 1024
+
+let assWindowCacheSequence = 0
+
+export function matroskaSubtitleWindowForTargetTime(targetTime: number): {
+  startTime: number
+  endTime: number
+} {
+  return subtitleWindowForTargetTime(targetTime, ASS_WINDOW_BACKWARD_SECONDS)
+}
+
+export function matroskaTextSubtitleWindowForTargetTime(targetTime: number): {
+  startTime: number
+  endTime: number
+} {
+  return subtitleWindowForTargetTime(targetTime, TEXT_WINDOW_BACKWARD_SECONDS)
+}
+
+function subtitleWindowForTargetTime(
+  targetTime: number,
+  backwardSeconds: number
+) {
+  const safeTargetTime = Number.isFinite(targetTime)
+    ? Math.max(0, targetTime)
+    : 0
+
+  return {
+    startTime: Math.max(0, safeTargetTime - backwardSeconds),
+    endTime: safeTargetTime + TEXT_WINDOW_FORWARD_SECONDS,
+  }
+}
+
 const MAX_BLOCK_BYTES = 64 * 1024
 
 const MAX_CONTENT_ENCODINGS = 4
@@ -586,6 +640,9 @@ const INDEXED_CLUSTER_READ_WINDOW = INDEXED_CLUSTER_READ_CONCURRENCY * 2
 const PAGE_PREFETCH_CONCURRENCY = 4
 
 const MAX_ASS_FONT_BYTES = 32 * 1024 * 1024
+
+const MAX_ASS_TRACK_INPUT_CACHE_BYTES =
+  MAX_ASS_FONT_BYTES + MAX_CODEC_PRIVATE_BYTES
 
 const MAX_ASS_FONT_FILE_BYTES = 24 * 1024 * 1024
 
@@ -1037,6 +1094,8 @@ interface IndexedCueOptions {
   cuePoints: CuePoint[]
   signal: AbortSignal
   onProgress?: (progress: MatroskaSubtitleReadProgress) => void
+  timeWindow?: SubtitleTimeWindow
+  incompleteHistory?: boolean
 }
 
 interface TrackBlockReadOptions {
@@ -1044,6 +1103,14 @@ interface TrackBlockReadOptions {
   trackNumber: number
   signal: AbortSignal
   onProgress?: (progress: MatroskaSubtitleReadProgress) => void
+  timeWindow?: SubtitleTimeWindow
+  includeHistoricalOverlaps?: boolean
+}
+
+interface SubtitleTimeWindow {
+  startTime: number
+  endTime: number
+  targetTime: number
 }
 
 interface CueClusterOptions {
@@ -1062,6 +1129,7 @@ interface IndexedClusterReadWindowOptions<T> {
   onProgress?: (progress: MatroskaSubtitleReadProgress) => void
   concurrency?: number
   window?: number
+  emitAsCompleted?: boolean
   readCluster: (cluster: IndexedCueCluster, signal: AbortSignal) => Promise<T[]>
 }
 
@@ -1080,6 +1148,8 @@ class IndexedClusterReadWindow<T> {
   private nextToStart = 0
 
   private nextToYield = 0
+
+  private yieldedCount = 0
 
   private failure: Error | null = null
 
@@ -1104,16 +1174,16 @@ class IndexedClusterReadWindow<T> {
     this.startAvailableReads()
 
     try {
-      while (this.nextToYield < this.options.clusters.length) {
+      while (this.yieldedCount < this.options.clusters.length) {
         if (this.options.signal.aborted) {
           throw new MatroskaSubtitleError("aborted")
         }
 
-        const ready = this.takeContiguousResults()
+        const ready = this.takeReadyResults()
 
         if (ready.advanced) {
           this.options.onProgress?.({
-            completed: this.nextToYield,
+            completed: this.yieldedCount,
             total: this.options.clusters.length,
           })
           this.startAvailableReads()
@@ -1125,7 +1195,7 @@ class IndexedClusterReadWindow<T> {
           continue
         }
 
-        if (this.failure !== null) {
+        if (this.failure !== null && !this.options.emitAsCompleted) {
           throw this.failure
         }
 
@@ -1143,12 +1213,13 @@ class IndexedClusterReadWindow<T> {
   private startAvailableReads(): void {
     while (
       !this.controller.signal.aborted &&
-      this.failure === null &&
+      (this.failure === null || this.options.emitAsCompleted) &&
       this.active.size <
         (this.options.concurrency ?? INDEXED_CLUSTER_READ_CONCURRENCY) &&
       this.nextToStart < this.options.clusters.length &&
       this.nextToStart <
-        this.nextToYield + (this.options.window ?? INDEXED_CLUSTER_READ_WINDOW)
+        (this.options.emitAsCompleted ? this.yieldedCount : this.nextToYield) +
+          (this.options.window ?? INDEXED_CLUSTER_READ_WINDOW)
     ) {
       const index = this.nextToStart
       const cluster = this.options.clusters[index]
@@ -1172,7 +1243,12 @@ class IndexedClusterReadWindow<T> {
         },
         (error: Error) => {
           this.failure ??= error
-          this.controller.abort()
+
+          if (this.options.emitAsCompleted) {
+            this.completed.set(index, [])
+          } else {
+            this.controller.abort()
+          }
         }
       )
       .finally(() => {
@@ -1184,7 +1260,24 @@ class IndexedClusterReadWindow<T> {
     this.active.set(index, task)
   }
 
-  private takeContiguousResults(): IndexedClusterWindowResult<T> {
+  private takeReadyResults(): IndexedClusterWindowResult<T> {
+    if (this.options.emitAsCompleted) {
+      const ready = [...this.completed.entries()].toSorted(
+        ([leftIndex], [rightIndex]) => leftIndex - rightIndex
+      )
+
+      for (const [index] of ready) {
+        this.completed.delete(index)
+      }
+
+      this.yieldedCount += ready.length
+
+      return {
+        blocks: ready.flatMap(([, blocks]) => blocks),
+        advanced: ready.length > 0,
+      }
+    }
+
     const blocks: T[] = []
     let advanced = false
 
@@ -1198,6 +1291,7 @@ class IndexedClusterReadWindow<T> {
       this.completed.delete(this.nextToYield)
       blocks.push(...result)
       this.nextToYield += 1
+      this.yieldedCount += 1
       advanced = true
     }
 
@@ -1260,6 +1354,24 @@ interface ScannedCluster {
   blocks: DecodedBlock[] | null
 }
 
+interface ScannedTextBlockBatch {
+  blocks: DecodedBlock[]
+  textBytes: number
+}
+
+interface ScannedTextBlockSelectionInput {
+  blocks: DecodedBlock[]
+  metadata: ParsedFile
+  timeWindow: SubtitleTimeWindow | undefined
+  textBytes: number
+}
+
+interface SubtitleScanBounds {
+  offset: number
+  scanEnd: number
+  segmentEnd: number
+}
+
 interface DeadlineScope {
   signal: AbortSignal
   expired: () => boolean
@@ -1282,6 +1394,8 @@ interface AssTrackPacketReadOptions {
   stream: MutableMatroskaAssTrackStream
   extendDeadline: () => void
   onProgress?: (progress: MatroskaSubtitleReadProgress) => void
+  timeWindow?: SubtitleTimeWindow
+  targetTime?: number
 }
 
 function createMatroskaAssTrackStream(): MutableMatroskaAssTrackStream {
@@ -1399,6 +1513,266 @@ function groupCuePositions(
   }
 
   return grouped
+}
+
+interface CueWindowSelection {
+  points: CuePoint[]
+  incompleteHistory: boolean
+}
+
+interface CueWindowSelectionOptions {
+  cuePoints: CuePoint[]
+  timestampScale: number
+  window: SubtitleTimeWindow
+  includeHistoricalOverlaps: boolean
+}
+
+interface SelectedCueHistory {
+  points: CuePoint[]
+  pointSet: Set<CuePoint>
+  clusters: Set<number>
+}
+
+interface CueWindowCandidates {
+  currentWindow: CuePoint[]
+  precedingPoint: CuePoint | null
+  knownOverlaps: CuePoint[]
+  unknownOverlaps: CuePoint[]
+}
+
+function selectCuePointsForWindow({
+  cuePoints,
+  timestampScale,
+  window,
+  includeHistoricalOverlaps,
+}: CueWindowSelectionOptions): CueWindowSelection {
+  const startTicks = (window.startTime * 1_000_000_000) / timestampScale
+  const endTicks = (window.endTime * 1_000_000_000) / timestampScale
+  const targetTicks = (window.targetTime * 1_000_000_000) / timestampScale
+
+  const candidates = collectCueWindowCandidates({
+    cuePoints,
+    startTicks,
+    endTicks,
+    targetTicks,
+    includeHistoricalOverlaps,
+  })
+
+  if (!includeHistoricalOverlaps) {
+    return selectCurrentCuePoints(candidates, targetTicks)
+  }
+
+  const history = selectHistoricalOverlaps(
+    candidates.knownOverlaps,
+    candidates.unknownOverlaps
+  )
+
+  return {
+    points: prioritizeTargetTimeCuePoints(
+      [...candidates.currentWindow, ...history.points],
+      targetTicks
+    ),
+    incompleteHistory: history.incompleteHistory,
+  }
+}
+
+function collectCueWindowCandidates({
+  cuePoints,
+  startTicks,
+  endTicks,
+  targetTicks,
+  includeHistoricalOverlaps,
+}: {
+  cuePoints: CuePoint[]
+  startTicks: number
+  endTicks: number
+  targetTicks: number
+  includeHistoricalOverlaps: boolean
+}): CueWindowCandidates {
+  const currentWindow: CuePoint[] = []
+  const knownOverlaps: CuePoint[] = []
+  const unknownOverlaps: CuePoint[] = []
+  let precedingPoint: CuePoint | null = null
+
+  for (const point of cuePoints.toSorted(
+    (left, right) => left.timeTicks - right.timeTicks
+  )) {
+    if (point.timeTicks >= startTicks) {
+      if (point.timeTicks > endTicks) {
+        break
+      }
+
+      currentWindow.push(point)
+      continue
+    }
+
+    precedingPoint = point
+
+    if (hasKnownCueOverlap(point, targetTicks)) {
+      knownOverlaps.push(point)
+    }
+
+    if (
+      includeHistoricalOverlaps &&
+      point.positions.some((position) => position.durationTicks === null)
+    ) {
+      unknownOverlaps.push(point)
+    }
+  }
+
+  return { currentWindow, precedingPoint, knownOverlaps, unknownOverlaps }
+}
+
+function hasKnownCueOverlap(point: CuePoint, targetTicks: number): boolean {
+  return point.positions.some(
+    (position) =>
+      position.durationTicks !== null &&
+      point.timeTicks + position.durationTicks >= targetTicks
+  )
+}
+
+function selectCurrentCuePoints(
+  candidates: CueWindowCandidates,
+  targetTicks: number
+): CueWindowSelection {
+  const { precedingPoint } = candidates
+  const history = selectHistoricalOverlaps(candidates.knownOverlaps, [])
+  const historicalPoints = [...history.points]
+
+  if (
+    precedingPoint !== null &&
+    precedingPoint.positions.some((position) => position.durationTicks === null)
+  ) {
+    historicalPoints.push(precedingPoint)
+  }
+
+  return {
+    points: prioritizeTargetTimeCuePoints(
+      [...candidates.currentWindow, ...historicalPoints],
+      targetTicks
+    ),
+    incompleteHistory: history.incompleteHistory,
+  }
+}
+
+// Cluster requests start in this order, so target-active and nearby cues run first.
+function prioritizeTargetTimeCuePoints(
+  points: CuePoint[],
+  targetTicks: number
+): CuePoint[] {
+  return [...new Set(points)].toSorted((left, right) => {
+    const leftActive = isCueActiveAtTarget(left, targetTicks)
+    const rightActive = isCueActiveAtTarget(right, targetTicks)
+
+    if (leftActive !== rightActive) {
+      return leftActive ? -1 : 1
+    }
+
+    const distanceDifference =
+      Math.abs(left.timeTicks - targetTicks) -
+      Math.abs(right.timeTicks - targetTicks)
+
+    return distanceDifference || left.timeTicks - right.timeTicks
+  })
+}
+
+function isCueActiveAtTarget(point: CuePoint, targetTicks: number): boolean {
+  return (
+    point.timeTicks <= targetTicks && hasKnownCueOverlap(point, targetTicks)
+  )
+}
+
+function selectHistoricalOverlaps(
+  knownOverlaps: CuePoint[],
+  unknownOverlaps: CuePoint[]
+): CueWindowSelection {
+  const selected: SelectedCueHistory = {
+    points: [],
+    pointSet: new Set(),
+    clusters: new Set<number>(),
+  }
+
+  let incompleteHistory = false
+
+  const history = sortUniqueCuePoints([
+    ...knownOverlaps,
+    ...unknownOverlaps,
+  ]).toSorted((left, right) => right.timeTicks - left.timeTicks)
+
+  for (const point of history) {
+    if (!includeHistoryPoint(point, selected)) {
+      incompleteHistory = true
+    }
+  }
+
+  return {
+    points: sortUniqueCuePoints(selected.points),
+    incompleteHistory,
+  }
+}
+
+function sortUniqueCuePoints(points: CuePoint[]): CuePoint[] {
+  return [...new Set(points)].toSorted(
+    (left, right) => left.timeTicks - right.timeTicks
+  )
+}
+
+function includeHistoryPoint(
+  point: CuePoint,
+  selected: SelectedCueHistory
+): boolean {
+  if (selected.pointSet.has(point)) {
+    return true
+  }
+
+  const pointClusters = new Set(
+    point.positions.map((position) => position.clusterPosition)
+  )
+
+  const newClusterCount = [...pointClusters].filter(
+    (clusterPosition) => !selected.clusters.has(clusterPosition)
+  ).length
+
+  if (selected.clusters.size + newClusterCount > MAX_OVERLAP_CUE_CLUSTERS) {
+    return false
+  }
+
+  addCuePointClusters(selected.clusters, point)
+  selected.points.push(point)
+  selected.pointSet.add(point)
+
+  return true
+}
+
+function addCuePointClusters(
+  selectedClusters: Set<number>,
+  point: CuePoint
+): void {
+  for (const position of point.positions) {
+    selectedClusters.add(position.clusterPosition)
+  }
+}
+
+function createSubtitleTimeWindow(
+  targetTime: number,
+  backwardSeconds = ASS_WINDOW_BACKWARD_SECONDS
+): SubtitleTimeWindow {
+  return {
+    ...subtitleWindowForTargetTime(targetTime, backwardSeconds),
+    targetTime,
+  }
+}
+
+function blockIntersectsWindow(
+  block: DecodedBlock,
+  timestampScale: number,
+  window: SubtitleTimeWindow
+): boolean {
+  const endTime =
+    block.startTime +
+    ((block.durationTicks ?? 0) * timestampScale) / 1_000_000_000
+
+  return block.startTime <= window.endTime && endTime >= window.startTime
 }
 
 function comparePgsPacketOrder(
@@ -2194,7 +2568,7 @@ class RangeReader {
 
       if (this.fileSize !== null && range.totalSize !== this.fileSize) {
         await cancelBody(response)
-        throw new MatroskaSubtitleError("invalid")
+        throw new MatroskaSubtitleError("range")
       }
 
       this.fileSize = range.totalSize
@@ -2243,7 +2617,7 @@ async function readRangeHeaders(
       })
     }
 
-    throw new MatroskaSubtitleError("invalid")
+    throw new MatroskaSubtitleError("range")
   }
 
   const match = /^bytes (\d+)-(\d+)\/(\d+)$/i.exec(
@@ -2252,7 +2626,7 @@ async function readRangeHeaders(
 
   if (match === null) {
     await cancelBody(response)
-    throw new MatroskaSubtitleError("invalid")
+    throw new MatroskaSubtitleError("range")
   }
 
   const rangeStart = Number(match[1])
@@ -2268,7 +2642,7 @@ async function readRangeHeaders(
     rangeEnd < rangeStart
   ) {
     await cancelBody(response)
-    throw new MatroskaSubtitleError("invalid")
+    throw new MatroskaSubtitleError("range")
   }
 
   return { totalSize, length: rangeEnd - rangeStart + 1 }
@@ -2581,11 +2955,12 @@ export function createMatroskaSubtitleReader(
       directReads: true,
     })
 
-  const createAssRangeReader = () =>
+  const createAssRangeReader = (fileSize: number | null = null) =>
     new RangeReader(mediaUrl, fetcher, {
       pageSize: ASS_PAGE_SIZE,
       maxRangeBytes: MAX_ASS_RANGE_BYTES,
       maxRangeRequests: MAX_ASS_RANGE_REQUESTS,
+      fileSize,
     })
 
   const createPgsRangeReader = (
@@ -2617,7 +2992,7 @@ export function createMatroskaSubtitleReader(
 }
 
 interface MatroskaRangeReaderFactories {
-  createAssRangeReader: () => RangeReader
+  createAssRangeReader: (fileSize: number | null) => RangeReader
   createCueRangeReader: (fileSize: number | null) => RangeReader
   createPgsRangeReader: (
     fileSize?: number | null,
@@ -2628,6 +3003,31 @@ interface MatroskaRangeReaderFactories {
 interface MatroskaSubtitleReaderState {
   metadata?: ParsedFile | null
   pgsCueIndexes?: Map<number, PgsCueIndexCacheEntry>
+  assWindows?: Map<number, CachedAssWindow[]>
+  assWindowBytes?: { value: number }
+  assTrackInputs?: Map<number, CachedAssTrackInput>
+  assTrackInputBytes?: { value: number }
+}
+
+interface CachedAssTrackInput extends MatroskaAssTrackMetadata {
+  byteLength: number
+  lastUsedAt: number
+}
+
+interface CachedAssWindow {
+  startTime: number
+  endTime: number
+  data: MatroskaAssTrackData
+  byteLength: number
+  lastUsedAt: number
+}
+
+function assTrackDataByteLength(data: MatroskaAssTrackData): number {
+  return (
+    data.codecPrivate.byteLength +
+    data.fonts.reduce((total, font) => total + font.byteLength, 0) +
+    data.packets.reduce((total, packet) => total + packet.data.byteLength, 0)
+  )
 }
 
 interface PgsCueIndexCacheEntry {
@@ -2638,6 +3038,10 @@ interface PgsCueIndexCacheEntry {
 class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
   private metadata: ParsedFile | null = null
   private readonly pgsCueIndexes: Map<number, PgsCueIndexCacheEntry>
+  private readonly assWindows: Map<number, CachedAssWindow[]>
+  private readonly assWindowBytes: { value: number }
+  private readonly assTrackInputs: Map<number, CachedAssTrackInput>
+  private readonly assTrackInputBytes: { value: number }
 
   constructor(
     private readonly reader: RangeReader,
@@ -2645,10 +3049,18 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     {
       metadata = null,
       pgsCueIndexes = new Map<number, PgsCueIndexCacheEntry>(),
+      assWindows = new Map<number, CachedAssWindow[]>(),
+      assWindowBytes = { value: 0 },
+      assTrackInputs = new Map<number, CachedAssTrackInput>(),
+      assTrackInputBytes = { value: 0 },
     }: MatroskaSubtitleReaderState = {}
   ) {
     this.metadata = metadata
     this.pgsCueIndexes = pgsCueIndexes
+    this.assWindows = assWindows
+    this.assWindowBytes = assWindowBytes
+    this.assTrackInputs = assTrackInputs
+    this.assTrackInputBytes = assTrackInputBytes
   }
 
   async probe(signal: AbortSignal): Promise<MatroskaTextTrack[]> {
@@ -2726,6 +3138,88 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     } finally {
       this.clearProgressCallback(extendDeadline)
       deadline.dispose()
+    }
+  }
+
+  async *streamCues({
+    trackNumber,
+    targetTime,
+    signal,
+    onProgress,
+  }: MatroskaCueStreamOptions): AsyncGenerator<SubtitleCue[]> {
+    const deadline = withDeadline(signal)
+    const extendDeadline = deadline.extend
+    this.reader.onProgress = extendDeadline
+
+    try {
+      yield* this.readTextCueBatches({
+        trackNumber,
+        targetTime,
+        signal: deadline.signal,
+        onProgress,
+        extendDeadline,
+      })
+    } catch (failure) {
+      if (signal.aborted) {
+        throw new MatroskaSubtitleError("aborted")
+      }
+
+      if (failure instanceof MatroskaSubtitleError) {
+        throw normalizeTextTrackFailure(failure, deadline.expired())
+      }
+
+      throw failure
+    } finally {
+      this.clearProgressCallback(extendDeadline)
+      deadline.dispose()
+    }
+  }
+
+  private async *readTextCueBatches({
+    trackNumber,
+    targetTime,
+    signal,
+    onProgress,
+    extendDeadline,
+  }: MatroskaCueStreamOptions & {
+    extendDeadline: () => void
+  }): AsyncGenerator<SubtitleCue[]> {
+    const metadata = await this.readMetadata(signal)
+
+    const track = metadata.tracks.find(
+      (candidate) => candidate.trackNumber === trackNumber
+    )
+
+    if (track === undefined || track.codecId !== "S_TEXT/UTF8") {
+      throw new MatroskaSubtitleError("invalid")
+    }
+
+    orderedContentEncodings(track)
+
+    const timeWindow = createSubtitleTimeWindow(
+      Number.isFinite(targetTime) ? Math.max(0, targetTime) : 0,
+      TEXT_WINDOW_BACKWARD_SECONDS
+    )
+
+    for await (const blocks of this.readTrackBlockBatches({
+      metadata,
+      trackNumber,
+      signal,
+      onProgress,
+      timeWindow,
+      // CueDuration can be absent even when the block has BlockDuration.
+      includeHistoricalOverlaps: true,
+    })) {
+      if (signal.aborted) {
+        throw new MatroskaSubtitleError("aborted")
+      }
+
+      extendDeadline()
+      const cues = this.createTextCues(blocks, metadata)
+
+      if (cues.length > 0) {
+        yield cues
+      }
     }
   }
 
@@ -3264,19 +3758,28 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     trackNumber: number,
     signal: AbortSignal
   ): Promise<MatroskaAssTrackData> {
-    return this.streamAssTrack(trackNumber, signal).result
+    return this.streamAssTrack({ trackNumber, signal }).result
   }
 
-  streamAssTrack(
-    trackNumber: number,
-    signal: AbortSignal,
-    onProgress?: (progress: MatroskaSubtitleReadProgress) => void
-  ): MatroskaAssTrackStream {
+  streamAssTrack({
+    trackNumber,
+    signal,
+    targetTime,
+    onProgress,
+  }: MatroskaAssTrackStreamOptions): MatroskaAssTrackStream {
     // Font data and cue packets need a larger byte budget than Phase 8 text
     // cues. Use an isolated reader so selecting ASS never changes UTF8 limits.
     const reader = new MatroskaSubtitleReaderImpl(
-      this.rangeReaders.createAssRangeReader(),
-      this.rangeReaders
+      this.rangeReaders.createAssRangeReader(this.reader.size),
+      this.rangeReaders,
+      {
+        metadata: this.metadata,
+        pgsCueIndexes: this.pgsCueIndexes,
+        assWindows: this.assWindows,
+        assWindowBytes: this.assWindowBytes,
+        assTrackInputs: this.assTrackInputs,
+        assTrackInputBytes: this.assTrackInputBytes,
+      }
     )
 
     const trackStream = createMatroskaAssTrackStream()
@@ -3286,6 +3789,7 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
         trackNumber,
         signal,
         stream: trackStream,
+        targetTime,
         onProgress,
       })
       .then(trackStream.complete, trackStream.fail)
@@ -3297,38 +3801,44 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     trackNumber,
     signal,
     stream,
+    targetTime,
     onProgress,
   }: Pick<
     AssTrackPacketReadOptions,
-    "trackNumber" | "signal" | "stream" | "onProgress"
+    "trackNumber" | "signal" | "stream" | "targetTime" | "onProgress"
   >): Promise<MatroskaAssTrackData> {
     const deadline = withDeadline(signal, ASS_TRACK_DEADLINE_MS)
 
+    const timeWindow =
+      targetTime === undefined || !Number.isFinite(targetTime)
+        ? undefined
+        : createSubtitleTimeWindow(Math.max(0, targetTime))
+
     try {
-      const input = await this.readAssTrackInput(
-        trackNumber,
-        deadline.signal,
-        stream
-      )
+      if (signal.aborted) {
+        throw new MatroskaSubtitleError("aborted")
+      }
 
-      deadline.extend()
+      if (timeWindow !== undefined) {
+        const cached = this.appendCachedAssWindow(
+          trackNumber,
+          timeWindow,
+          stream
+        )
 
-      const packets = await this.readAssTrackPackets({
-        metadata: input.metadata,
+        if (cached !== null) {
+          return cached
+        }
+      }
+
+      return await this.readAssWindowData({
         trackNumber,
         signal: deadline.signal,
         stream,
         onProgress,
-        // The deadline is a no-progress bound: through a slow proxy the whole
-        // track can outrun the wall clock while every read keeps succeeding.
         extendDeadline: deadline.extend,
+        timeWindow,
       })
-
-      return {
-        codecPrivate: input.codecPrivate,
-        packets,
-        fonts: input.fonts,
-      }
     } catch (failure) {
       if (signal.aborted) {
         throw new MatroskaSubtitleError("aborted")
@@ -3352,6 +3862,246 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     }
   }
 
+  private async readAssWindowData({
+    trackNumber,
+    signal,
+    stream,
+    onProgress,
+    extendDeadline,
+    timeWindow,
+  }: Pick<
+    AssTrackPacketReadOptions,
+    "trackNumber" | "signal" | "stream" | "onProgress" | "extendDeadline"
+  > & {
+    timeWindow: SubtitleTimeWindow | undefined
+  }): Promise<MatroskaAssTrackData> {
+    const input = await this.readAssTrackInput(trackNumber, signal, stream)
+
+    extendDeadline()
+
+    const packets = await this.readAssTrackPackets({
+      metadata: input.metadata,
+      trackNumber,
+      signal,
+      stream,
+      onProgress,
+      // A slow proxy may keep a healthy full track alive by making progress.
+      extendDeadline,
+      timeWindow,
+    })
+
+    const data = {
+      codecPrivate: input.codecPrivate,
+      packets,
+      fonts: input.fonts,
+    }
+
+    if (timeWindow !== undefined && !signal.aborted) {
+      this.cacheAssWindow(trackNumber, timeWindow, data)
+    }
+
+    return data
+  }
+
+  private findCachedAssWindow(
+    trackNumber: number,
+    requested: SubtitleTimeWindow
+  ): CachedAssWindow | null {
+    const windows = this.assWindows.get(trackNumber)
+
+    if (windows === undefined) {
+      return null
+    }
+
+    const match = windows.find(
+      (window) =>
+        window.startTime <= requested.startTime &&
+        window.endTime >= requested.endTime
+    )
+
+    if (match === undefined) {
+      return null
+    }
+
+    match.lastUsedAt = ++assWindowCacheSequence
+
+    return match
+  }
+
+  private appendCachedAssWindow(
+    trackNumber: number,
+    timeWindow: SubtitleTimeWindow,
+    stream: MutableMatroskaAssTrackStream
+  ): MatroskaAssTrackData | null {
+    const cached = this.findCachedAssWindow(trackNumber, timeWindow)
+
+    if (cached === null) {
+      return null
+    }
+
+    stream.setMetadata({
+      codecPrivate: cached.data.codecPrivate,
+      fonts: cached.data.fonts,
+    })
+    stream.appendPackets(cached.data.packets)
+
+    return cached.data
+  }
+
+  private cacheAssWindow(
+    trackNumber: number,
+    timeWindow: SubtitleTimeWindow,
+    data: MatroskaAssTrackData
+  ): void {
+    const byteLength = assTrackDataByteLength(data)
+
+    if (byteLength > MAX_ASS_CACHED_WINDOW_BYTES) {
+      return
+    }
+
+    const retained = this.removeDuplicateAssWindow(trackNumber, timeWindow)
+
+    const cached: CachedAssWindow = {
+      startTime: timeWindow.startTime,
+      endTime: timeWindow.endTime,
+      data,
+      byteLength,
+      lastUsedAt: ++assWindowCacheSequence,
+    }
+
+    retained.push(cached)
+    this.assWindows.set(trackNumber, retained)
+    this.assWindowBytes.value += byteLength
+
+    this.trimAssWindowCache()
+  }
+
+  private removeDuplicateAssWindow(
+    trackNumber: number,
+    timeWindow: SubtitleTimeWindow
+  ): CachedAssWindow[] {
+    const existing = this.assWindows.get(trackNumber) ?? []
+
+    const retained = existing.filter(
+      (window) =>
+        window.startTime !== timeWindow.startTime ||
+        window.endTime !== timeWindow.endTime
+    )
+
+    for (const window of existing) {
+      if (!retained.includes(window)) {
+        this.assWindowBytes.value -= window.byteLength
+      }
+    }
+
+    return retained
+  }
+
+  private trimAssWindowCache(): void {
+    while (this.assWindowBytes.value > MAX_ASS_CACHED_WINDOW_BYTES) {
+      const oldest = this.findOldestAssWindow()
+
+      if (oldest === null) {
+        break
+      }
+
+      this.removeAssWindow(oldest.trackNumber, oldest.window)
+    }
+  }
+
+  private findOldestAssWindow(): {
+    trackNumber: number
+    window: CachedAssWindow
+  } | null {
+    let oldest: { trackNumber: number; window: CachedAssWindow } | null = null
+
+    for (const [trackNumber, windows] of this.assWindows) {
+      for (const window of windows) {
+        if (oldest === null || window.lastUsedAt < oldest.window.lastUsedAt) {
+          oldest = { trackNumber, window }
+        }
+      }
+    }
+
+    return oldest
+  }
+
+  private removeAssWindow(
+    trackNumber: number,
+    removedWindow: CachedAssWindow
+  ): void {
+    const remaining = (this.assWindows.get(trackNumber) ?? []).filter(
+      (window) => window !== removedWindow
+    )
+
+    if (remaining.length === 0) {
+      this.assWindows.delete(trackNumber)
+    } else {
+      this.assWindows.set(trackNumber, remaining)
+    }
+
+    this.assWindowBytes.value -= removedWindow.byteLength
+  }
+
+  private findCachedAssTrackInput(
+    trackNumber: number
+  ): CachedAssTrackInput | null {
+    const cached = this.assTrackInputs.get(trackNumber)
+
+    if (cached === undefined) {
+      return null
+    }
+
+    cached.lastUsedAt = ++assWindowCacheSequence
+
+    return cached
+  }
+
+  private cacheAssTrackInput(
+    trackNumber: number,
+    input: MatroskaAssTrackMetadata
+  ): void {
+    const byteLength =
+      input.codecPrivate.byteLength +
+      input.fonts.reduce((total, font) => total + font.byteLength, 0)
+
+    if (byteLength > MAX_ASS_TRACK_INPUT_CACHE_BYTES) {
+      return
+    }
+
+    const existing = this.assTrackInputs.get(trackNumber)
+
+    if (existing !== undefined) {
+      this.assTrackInputBytes.value -= existing.byteLength
+    }
+
+    this.assTrackInputs.set(trackNumber, {
+      ...input,
+      byteLength,
+      lastUsedAt: ++assWindowCacheSequence,
+    })
+    this.assTrackInputBytes.value += byteLength
+
+    while (this.assTrackInputBytes.value > MAX_ASS_TRACK_INPUT_CACHE_BYTES) {
+      let oldestTrackNumber: number | null = null
+      let oldest: CachedAssTrackInput | null = null
+
+      for (const [candidateTrackNumber, candidate] of this.assTrackInputs) {
+        if (oldest === null || candidate.lastUsedAt < oldest.lastUsedAt) {
+          oldest = candidate
+          oldestTrackNumber = candidateTrackNumber
+        }
+      }
+
+      if (oldest === null || oldestTrackNumber === null) {
+        break
+      }
+
+      this.assTrackInputs.delete(oldestTrackNumber)
+      this.assTrackInputBytes.value -= oldest.byteLength
+    }
+  }
+
   private async readAssTrackInput(
     trackNumber: number,
     signal: AbortSignal,
@@ -3362,7 +4112,31 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     fonts: Uint8Array[]
   }> {
     const metadata = await this.readMetadata(signal)
+    const track = this.findAssTrack(metadata, trackNumber)
+    const cached = this.findCachedAssTrackInput(trackNumber)
 
+    if (cached !== null) {
+      return this.readCachedAssTrackInput({
+        metadata,
+        cached,
+        signal,
+        stream,
+      })
+    }
+
+    return this.readUncachedAssTrackInput({
+      metadata,
+      track,
+      trackNumber,
+      signal,
+      stream,
+    })
+  }
+
+  private findAssTrack(
+    metadata: ParsedFile,
+    trackNumber: number
+  ): ParsedFile["tracks"][number] {
     const track = metadata.tracks.find(
       (candidate) => candidate.trackNumber === trackNumber
     )
@@ -3379,13 +4153,71 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
 
     orderedContentEncodings(track)
 
-    if (track.codecPrivate.size > MAX_CODEC_PRIVATE_BYTES) {
+    return track
+  }
+
+  private async readCachedAssTrackInput({
+    metadata,
+    cached,
+    signal,
+    stream,
+  }: {
+    metadata: ParsedFile
+    cached: CachedAssTrackInput
+    signal: AbortSignal
+    stream: MutableMatroskaAssTrackStream
+  }): Promise<{
+    metadata: ParsedFile
+    codecPrivate: Uint8Array
+    fonts: Uint8Array[]
+  }> {
+    if (this.reader.size === null) {
+      await this.reader.read(0, 1, signal)
+    }
+
+    stream.setMetadata(cached)
+
+    return {
+      metadata,
+      codecPrivate: cached.codecPrivate,
+      fonts: cached.fonts,
+    }
+  }
+
+  private async readUncachedAssTrackInput({
+    metadata,
+    track,
+    trackNumber,
+    signal,
+    stream,
+  }: {
+    metadata: ParsedFile
+    track: ParsedFile["tracks"][number]
+    trackNumber: number
+    signal: AbortSignal
+    stream: MutableMatroskaAssTrackStream
+  }): Promise<{
+    metadata: ParsedFile
+    codecPrivate: Uint8Array
+    fonts: Uint8Array[]
+  }> {
+    const codecPrivateHeader = track.codecPrivate
+
+    if (
+      codecPrivateHeader === null ||
+      codecPrivateHeader.size === null ||
+      codecPrivateHeader.size === 0
+    ) {
+      throw new MatroskaSubtitleError("invalid")
+    }
+
+    if (codecPrivateHeader.size > MAX_CODEC_PRIVATE_BYTES) {
       throw new MatroskaSubtitleError("limit")
     }
 
     const codecPrivate = await this.reader.read(
-      track.codecPrivate.dataStart,
-      track.codecPrivate.size,
+      codecPrivateHeader.dataStart,
+      codecPrivateHeader.size,
       signal
     )
 
@@ -3395,9 +4227,16 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
       signal
     )
 
-    stream.setMetadata({ codecPrivate, fonts })
+    const input = { codecPrivate, fonts }
 
-    return { metadata, codecPrivate, fonts }
+    if (signal.aborted) {
+      throw new MatroskaSubtitleError("aborted")
+    }
+
+    stream.setMetadata(input)
+    this.cacheAssTrackInput(trackNumber, input)
+
+    return { metadata, ...input }
   }
 
   private async readAssTrackPackets({
@@ -3407,6 +4246,7 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     stream,
     extendDeadline,
     onProgress,
+    timeWindow,
   }: AssTrackPacketReadOptions): Promise<MatroskaAssPacket[]> {
     const packets: MatroskaAssPacket[] = []
     let packetBytes = 0
@@ -3416,6 +4256,8 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
       trackNumber,
       signal,
       onProgress,
+      timeWindow,
+      includeHistoricalOverlaps: true,
     })) {
       const batch = this.createAssPackets(blocks, metadata.timestampScale)
 
@@ -3434,10 +4276,6 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
 
       extendDeadline()
       stream.appendPackets(batch)
-    }
-
-    if (packets.length === 0) {
-      throw new MatroskaSubtitleError("invalid")
     }
 
     return packets
@@ -4738,6 +5576,8 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     trackNumber,
     signal,
     onProgress,
+    timeWindow,
+    includeHistoricalOverlaps,
   }: TrackBlockReadOptions): AsyncGenerator<DecodedBlock[]> {
     const cuePositions = await this.readCuePositions(
       metadata,
@@ -4746,26 +5586,39 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     )
 
     if (cuePositions.length === 0) {
-      const blocks = await this.scanForTrack({
+      yield* this.scanForTrack({
         metadata,
         trackNumber,
         signal,
         onProgress,
+        timeWindow,
       })
 
-      if (blocks.length > 0) {
-        yield blocks
-      }
+      return
+    }
 
+    const selection =
+      timeWindow === undefined
+        ? { points: cuePositions, incompleteHistory: false }
+        : selectCuePointsForWindow({
+            cuePoints: cuePositions,
+            timestampScale: metadata.timestampScale,
+            window: timeWindow,
+            includeHistoricalOverlaps: includeHistoricalOverlaps === true,
+          })
+
+    if (selection.points.length === 0) {
       return
     }
 
     yield* this.readIndexedBlockBatches({
       metadata,
       trackNumber,
-      cuePoints: cuePositions,
+      cuePoints: selection.points,
       signal,
       onProgress,
+      timeWindow,
+      incompleteHistory: selection.incompleteHistory,
     })
   }
 
@@ -5585,6 +6438,8 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     cuePoints,
     signal,
     onProgress,
+    timeWindow,
+    incompleteHistory,
   }: IndexedCueOptions): AsyncGenerator<DecodedBlock[]> {
     const clusters = [...groupCuePositions(cuePoints)]
     let blockCount = 0
@@ -5603,6 +6458,7 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
       clusters,
       signal,
       onProgress,
+      emitAsCompleted: timeWindow !== undefined,
       readCluster: ([clusterPosition, positions], readSignal) =>
         this.readCueCluster({
           metadata,
@@ -5626,7 +6482,20 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
         }
       }
 
-      yield decodedBlocks
+      const selectedBlocks =
+        timeWindow === undefined
+          ? decodedBlocks
+          : decodedBlocks.filter((block) =>
+              blockIntersectsWindow(block, metadata.timestampScale, timeWindow)
+            )
+
+      if (selectedBlocks.length > 0) {
+        yield selectedBlocks
+      }
+    }
+
+    if (incompleteHistory) {
+      throw new MatroskaSubtitleError("limit", timeWindow?.targetTime)
     }
   }
 
@@ -5738,12 +6607,13 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
     return textBytes
   }
 
-  private async scanForTrack({
+  private async *scanForTrack({
     metadata,
     trackNumber,
     signal,
     onProgress,
-  }: TrackBlockReadOptions): Promise<DecodedBlock[]> {
+    timeWindow,
+  }: TrackBlockReadOptions): AsyncGenerator<DecodedBlock[]> {
     if (metadata.firstCluster === null) {
       throw new MatroskaSubtitleError("unsupported")
     }
@@ -5755,28 +6625,41 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
 
     let offset = metadata.firstCluster.start
     let textBytes = 0
-    const blocks: DecodedBlock[] = []
 
     while (offset < scanEnd) {
       if (signal.aborted) {
         throw new MatroskaSubtitleError("aborted")
       }
 
-      const scanned = await this.readAndAppendScannedTrackCluster({
+      const scanned = await this.readScannedCluster({
         metadata,
         trackNumber,
         signal,
         offset,
-        blocks,
-        textBytes,
       })
 
-      if (scanned === null) {
-        reportSubtitleReadProgress(onProgress, 1, 1)
+      const { nextOffset, blocks } = scanned
+
+      if (this.reportTrackScanFinished(blocks, onProgress)) {
         break
       }
 
-      ;({ nextOffset: offset, textBytes } = scanned)
+      const batch = this.selectScannedTextBlocks({
+        blocks,
+        metadata,
+        timeWindow,
+        textBytes,
+      })
+
+      const { blocks: selectedBlocks, textBytes: nextTextBytes } = batch
+
+      textBytes = nextTextBytes
+
+      if (selectedBlocks.length > 0) {
+        yield selectedBlocks
+      }
+
+      offset = nextOffset
 
       reportSubtitleReadProgress(
         onProgress,
@@ -5785,47 +6668,56 @@ class MatroskaSubtitleReaderImpl implements MatroskaSubtitleReader {
       )
     }
 
-    if (offset < metadata.segmentEnd && offset >= scanEnd) {
-      throw new MatroskaSubtitleError("limit")
-    }
-
-    return blocks
+    this.ensureScanCompletedWithinBounds({
+      offset,
+      scanEnd,
+      segmentEnd: metadata.segmentEnd,
+    })
   }
 
-  private async readAndAppendScannedTrackCluster({
-    metadata,
-    trackNumber,
-    signal,
-    offset,
-    blocks,
-    textBytes,
-  }: {
-    metadata: ParsedFile
-    trackNumber: number
-    signal: AbortSignal
-    offset: number
-    blocks: DecodedBlock[]
-    textBytes: number
-  }): Promise<{ nextOffset: number; textBytes: number } | null> {
-    const scanned = await this.readScannedCluster({
-      metadata,
-      offset,
-      trackNumber,
-      signal,
-    })
-
-    if (scanned.blocks === null) {
-      return null
+  private reportTrackScanFinished(
+    blocks: DecodedBlock[] | null,
+    onProgress: TrackBlockReadOptions["onProgress"]
+  ): blocks is null {
+    if (blocks !== null) {
+      return false
     }
 
-    const nextTextBytes =
-      textBytes + this.appendDecodedBlocks(blocks, scanned.blocks)
+    reportSubtitleReadProgress(onProgress, 1, 1)
+
+    return true
+  }
+
+  private ensureScanCompletedWithinBounds({
+    offset,
+    scanEnd,
+    segmentEnd,
+  }: SubtitleScanBounds): void {
+    if (offset < segmentEnd && offset >= scanEnd) {
+      throw new MatroskaSubtitleError("limit")
+    }
+  }
+
+  private selectScannedTextBlocks({
+    blocks,
+    metadata,
+    timeWindow,
+    textBytes,
+  }: ScannedTextBlockSelectionInput): ScannedTextBlockBatch {
+    const selected =
+      timeWindow === undefined
+        ? blocks
+        : blocks.filter((block) =>
+            blockIntersectsWindow(block, metadata.timestampScale, timeWindow)
+          )
+
+    const nextTextBytes = textBytes + this.appendDecodedBlocks([], blocks)
 
     if (nextTextBytes > MAX_SUBTITLE_TEXT_BYTES) {
       throw new MatroskaSubtitleError("limit")
     }
 
-    return { nextOffset: scanned.nextOffset, textBytes: nextTextBytes }
+    return { blocks: selected, textBytes: nextTextBytes }
   }
 
   private async readScannedCluster({

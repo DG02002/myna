@@ -1,3 +1,5 @@
+import type { AdvancedReadFailureKind } from "../read-policy"
+
 type MediaDiagnosticStage =
   | "source"
   | "audio"
@@ -35,8 +37,11 @@ export interface MediaDiagnosticRecord {
   errorCode?: number
   httpStatus?: number
   retryAfterMs?: number
+  readErrorKind?: AdvancedReadFailureKind
+  retryAttempt?: number
   operationId?: number
   byteCount?: number
+  rangeStart?: number
 }
 
 export type MediaDiagnosticInput = Omit<MediaDiagnosticRecord, "atMs">

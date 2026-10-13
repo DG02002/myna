@@ -7,6 +7,7 @@ import {
   MatroskaSubtitleError,
   type MatroskaPgsPacket,
 } from "./matroska-subtitles"
+import type { SubtitleCue } from "./subtitles"
 
 const IDS = {
   ebml: "1A45DFA3",
@@ -419,17 +420,23 @@ function makeFixture({
           concat(...attachments.map(attachedFileElement))
         )
 
-  const timestampElement = uintElement(IDS.clusterTimestamp, 0)
+  const defaultTimestampElement = uintElement(IDS.clusterTimestamp, 0)
   const blocks: FixtureBlock[] = []
   const clusters: Uint8Array[] = []
-  let clusterData = timestampElement
+  let clusterData = defaultTimestampElement
 
   for (const track of tracks) {
     for (const packet of track.blocks ?? [track]) {
-      const block = makeBlock(track, packet)
-
       if (clusterPerBlock) {
         const clusterIndex = clusters.length
+
+        const clusterTicks = Math.floor(packet.timestamp / 30_000) * 30_000
+        const timestampElement = uintElement(IDS.clusterTimestamp, clusterTicks)
+
+        const block = makeBlock(track, {
+          ...packet,
+          timestamp: packet.timestamp - clusterTicks,
+        })
 
         const clusterPadding =
           (clusterPaddingBytesByIndex[clusterIndex] ?? clusterPaddingBytes) > 0
@@ -454,6 +461,8 @@ function makeFixture({
           element(IDS.cluster, concat(timestampElement, block, clusterPadding))
         )
       } else {
+        const block = makeBlock(track, packet)
+
         blocks.push({
           trackNumber: track.trackNumber,
           timestamp: packet.timestamp,
@@ -621,6 +630,29 @@ function rangedFetch(
         "Content-Range": `bytes ${start}-${end}/${bytes.byteLength}`,
       },
     })
+  }
+}
+
+async function waitForSignal(
+  signal: Promise<void>,
+  label: string
+): Promise<void> {
+  let deadline: ReturnType<typeof setTimeout> | null = null
+
+  try {
+    await Promise.race([
+      signal,
+      new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(
+          () => reject(new Error(`Timed out waiting for ${label}.`)),
+          2_000
+        )
+      }),
+    ])
+  } finally {
+    if (deadline !== null) {
+      clearTimeout(deadline)
+    }
   }
 }
 
@@ -885,6 +917,184 @@ void test("reads sparse SRT clusters within its bounded track budget", async () 
     requests.reduce((total, request) => total + request.bytes, 0) <
       16 * 1024 * 1024
   )
+})
+
+void test("streams the active UTF8 cue before a later cluster finishes", async () => {
+  const bytes = makeFixture({
+    clusterPerBlock: true,
+    clusterPaddingBytes: 128 * 1024,
+    tracks: [
+      makeTrack({
+        trackNumber: 2,
+        name: "English",
+        language: "eng",
+        blocks: [
+          {
+            timestamp: 0,
+            cueDurationTicks: 1_000,
+            textBytes: new TextEncoder().encode("Intro"),
+          },
+          {
+            timestamp: 100_000,
+            cueDurationTicks: 1_000,
+            textBytes: new TextEncoder().encode("Obsolete cue"),
+          },
+          {
+            timestamp: 270_000,
+            cueDurationTicks: 32_000,
+            textBytes: new TextEncoder().encode("Current cue"),
+          },
+          {
+            timestamp: 320_000,
+            cueDurationTicks: 1_000,
+            textBytes: new TextEncoder().encode("Later cue"),
+          },
+        ],
+      }),
+    ],
+  })
+
+  const clusterOffsets = findElementOffsets(bytes, IDS.cluster)
+  const obsoleteCluster = clusterOffsets[1] ?? 0
+  const laterCluster = clusterOffsets.at(-1) ?? 0
+  const obsoletePage = Math.floor(obsoleteCluster / (64 * 1024)) * (64 * 1024)
+  const laterPage = Math.floor(laterCluster / (64 * 1024)) * (64 * 1024)
+  const requests: RecordedRange[] = []
+
+  let markLaterPageStarted!: () => void
+
+  let releaseLaterPage!: () => void
+
+  const laterPageStarted = new Promise<void>((resolve) => {
+    markLaterPageStarted = resolve
+  })
+
+  const laterPageRelease = new Promise<void>((resolve) => {
+    releaseLaterPage = resolve
+  })
+
+  const fixtureFetch = rangedFetch(bytes, requests)
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const range = new Headers(init?.headers).get("Range") ?? ""
+    const start = Number(/^bytes=(\d+)-\d+$/.exec(range)?.[1])
+
+    if (start === laterPage) {
+      markLaterPageStarted()
+      await laterPageRelease
+    }
+
+    return fixtureFetch(input, init)
+  }
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/incremental-utf8.mkv",
+    fetcher
+  )
+
+  const received: Array<{ startTime: number; endTime: number; text: string }> =
+    []
+
+  let markCurrentCueDelivered!: () => void
+
+  const currentCueDelivered = new Promise<void>((resolve) => {
+    markCurrentCueDelivered = resolve
+  })
+
+  let completed = false
+
+  const streamTask = (async () => {
+    for await (const batch of reader.streamCues({
+      trackNumber: 2,
+      targetTime: 301,
+      signal: new AbortController().signal,
+    })) {
+      received.push(...batch)
+
+      if (batch.some((cue) => cue.text === "Current cue")) {
+        markCurrentCueDelivered()
+      }
+    }
+
+    completed = true
+  })()
+
+  try {
+    await waitForSignal(currentCueDelivered, "the active subtitle cue")
+    await waitForSignal(laterPageStarted, "the distant later cluster")
+
+    assert.deepEqual(
+      received.find((cue) => cue.text === "Current cue"),
+      { startTime: 270, endTime: 302, text: "Current cue" }
+    )
+    assert.equal(completed, false)
+    assert.equal(
+      requests.some(
+        (request) =>
+          Number(/^bytes=(\d+)-/.exec(request.header)?.[1]) === obsoletePage
+      ),
+      false
+    )
+  } finally {
+    releaseLaterPage()
+  }
+
+  await streamTask
+  assert.ok(received.some((cue) => cue.text === "Later cue"))
+})
+
+void test("seeking retains every known active UTF8 overlap", async () => {
+  const encoder = new TextEncoder()
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/overlapping-cues.mkv",
+    rangedFetch(
+      makeFixture({
+        clusterPerBlock: true,
+        tracks: [
+          makeTrack({
+            trackNumber: 2,
+            name: "English",
+            language: "eng",
+            blocks: [
+              {
+                timestamp: 0,
+                cueDurationTicks: 400_000,
+                textBytes: encoder.encode("Long caption"),
+              },
+              {
+                timestamp: 280_000,
+                cueDurationTicks: 20_000,
+                textBytes: encoder.encode("Middle caption"),
+              },
+              {
+                timestamp: 300_000,
+                cueDurationTicks: 5_000,
+                textBytes: encoder.encode("Current caption"),
+              },
+            ],
+          }),
+        ],
+      }),
+      []
+    )
+  )
+
+  const cues: SubtitleCue[] = []
+
+  for await (const batch of reader.streamCues({
+    trackNumber: 2,
+    targetTime: 301,
+    signal: new AbortController().signal,
+  })) {
+    cues.push(...batch)
+  }
+
+  assert.deepEqual(cues, [
+    { startTime: 0, endTime: 400, text: "Long caption" },
+    { startTime: 280, endTime: 300, text: "Middle caption" },
+    { startTime: 300, endTime: 305, text: "Current caption" },
+  ])
 })
 
 void test("calls the range fetcher with its global receiver", async () => {
@@ -1726,7 +1936,11 @@ void test("streams indexed ASS packets before later cluster reads finish", async
     fetcher
   )
 
-  const stream = reader.streamAssTrack(2, new AbortController().signal)
+  const stream = reader.streamAssTrack({
+    trackNumber: 2,
+    signal: new AbortController().signal,
+  })
+
   const received: string[] = []
   const replayed: string[] = []
   let resolveFirstBatch!: () => void
@@ -1859,7 +2073,7 @@ void test("ASS deadline reports timeout after retaining partial packets", async 
   const stream = createMatroskaSubtitleReader(
     "https://media.example/partial-ass-deadline.mkv",
     fetcher
-  ).streamAssTrack(2, source.signal)
+  ).streamAssTrack({ trackNumber: 2, signal: source.signal })
 
   const received: string[] = []
   const replayed: string[] = []
@@ -1995,7 +2209,7 @@ void test("keeps a progressing ASS load alive by re-arming the track deadline", 
   const stream = createMatroskaSubtitleReader(
     "https://media.example/ass-extended-deadline.mkv",
     fetcher
-  ).streamAssTrack(2, new AbortController().signal)
+  ).streamAssTrack({ trackNumber: 2, signal: new AbortController().signal })
 
   let resolveFirstBatches!: () => void
 
@@ -2050,6 +2264,7 @@ void test("accepts ASS tracks above 10,000 packets within the shared cue limit",
     "https://media.example/many-ass-cues.mkv",
     rangedFetch(
       makeFixture({
+        clusterPerBlock: true,
         tracks: [
           makeTrack({
             trackNumber: 2,
@@ -2072,7 +2287,7 @@ void test("accepts ASS tracks above 10,000 packets within the shared cue limit",
 })
 
 void test("loads only linked font attachments and tolerates a missing font", async () => {
-  const linkedFont = Uint8Array.of(0, 1, 2, 3, 4, 5, 6, 7)
+  const linkedFont = Uint8Array.from({ length: 32 }, (_, index) => 0x80 + index)
   const legacyTtf = Uint8Array.of(8, 9, 10, 11)
   const legacySfnt = Uint8Array.of(12, 13, 14, 15)
   const legacyWoff = Uint8Array.of(16, 17, 18, 19)
@@ -2091,6 +2306,12 @@ void test("loads only linked font attachments and tolerates a missing font", asy
   const bytes = makeFixture({
     tracks: [track],
     attachments: [
+      {
+        uid: 200,
+        name: "Unlinked.ttf",
+        mimeType: "font/ttf",
+        data: unrelatedFont,
+      },
       {
         uid: 100,
         name: "Fixture.ttf",
@@ -2116,8 +2337,8 @@ void test("loads only linked font attachments and tolerates a missing font", asy
         data: legacyWoff,
       },
       {
-        uid: 200,
-        name: "Unlinked.ttf",
+        uid: 201,
+        name: "Trailing unlinked.ttf",
         mimeType: "font/ttf",
         data: unrelatedFont,
       },
@@ -2131,11 +2352,40 @@ void test("loads only linked font attachments and tolerates a missing font", asy
     rangedFetch(bytes, requests)
   )
 
-  assert.deepEqual(
-    (await reader.readAssTrack(2, new AbortController().signal)).fonts,
-    [linkedFont, legacyTtf, legacySfnt, legacyWoff]
-  )
+  const { signal } = new AbortController()
+  await reader.probe(signal)
+
+  assert.deepEqual((await reader.readAssTrack(2, signal)).fonts, [
+    linkedFont,
+    legacyTtf,
+    legacySfnt,
+    legacyWoff,
+  ])
   assert.ok(requests.every(({ header }) => header.startsWith("bytes=")))
+
+  const linkedFontOffset = Buffer.from(bytes).indexOf(Buffer.from(linkedFont))
+  const requestsBeforeNextWindow = requests.length
+
+  await reader.streamAssTrack({
+    trackNumber: 2,
+    signal,
+    targetTime: 10,
+  }).result
+
+  assert.ok(linkedFontOffset >= 0)
+  assert.equal(
+    requests.slice(requestsBeforeNextWindow).some(({ header }) => {
+      const match = /^bytes=(\d+)-(\d+)$/.exec(header)
+
+      return (
+        match !== null &&
+        Number(match[1]) <= linkedFontOffset &&
+        Number(match[2]) >= linkedFontOffset
+      )
+    }),
+    false,
+    "later ASS windows reuse linked font bytes"
+  )
 
   const missingFontReader = createMatroskaSubtitleReader(
     "https://media.example/missing-font.mkv",
@@ -2164,6 +2414,60 @@ void test("loads only linked font attachments and tolerates a missing font", asy
     (await missingFontReader.readAssTrack(2, new AbortController().signal))
       .fonts,
     []
+  )
+})
+
+void test("accepts empty ASS windows and loads later dialogue", async () => {
+  const encoder = new TextEncoder()
+
+  const reader = createMatroskaSubtitleReader(
+    "https://media.example/empty-ass-window.mkv",
+    rangedFetch(
+      makeFixture({
+        clusterPerBlock: true,
+        tracks: [
+          makeTrack({
+            trackNumber: 2,
+            name: "English ASS",
+            language: "eng",
+            codecId: "S_TEXT/ASS",
+            codecPrivate: encoder.encode("[Script Info]\r\n[Events]\r\n"),
+            blocks: [
+              {
+                timestamp: 200_000,
+                cueDurationTicks: 5_000,
+                textBytes: encoder.encode(
+                  "0,0:03:20.00,0:03:25.00,Default,,0,0,0,,Later dialogue"
+                ),
+              },
+            ],
+          }),
+        ],
+      }),
+      []
+    )
+  )
+
+  const { signal } = new AbortController()
+
+  const emptyWindow = await reader.streamAssTrack({
+    trackNumber: 2,
+    signal,
+    targetTime: 40,
+  }).result
+
+  assert.deepEqual(emptyWindow.packets, [])
+
+  const laterWindow = await reader.streamAssTrack({
+    trackNumber: 2,
+    signal,
+    targetTime: 200,
+  }).result
+
+  assert.equal(laterWindow.packets.length, 1)
+  assert.equal(
+    new TextDecoder().decode(laterWindow.packets[0]?.data),
+    "0,0:03:20.00,0:03:25.00,Default,,0,0,0,,Later dialogue"
   )
 })
 
@@ -2393,7 +2697,10 @@ void test("fills the bounded indexed cluster read window behind a slow cluster",
     delayedFetch
   )
 
-  const stream = reader.streamAssTrack(2, new AbortController().signal)
+  const stream = reader.streamAssTrack({
+    trackNumber: 2,
+    signal: new AbortController().signal,
+  })
 
   stream.subscribePackets((batch) => {
     received.push(...batch.map(({ data }) => new TextDecoder().decode(data)))

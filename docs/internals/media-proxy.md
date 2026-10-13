@@ -5,6 +5,28 @@ media origin blocks cross-origin byte access. Native playback is never
 proxied; the route exists for Mediabunny's byte reads (and its background
 probe) only.
 
+Mediabunny's URL reads, metadata probe, and filename/size request share
+`AdvancedMediaReadPolicy`. It times out after 15 seconds without response
+headers or body progress; these are inactivity limits, not a movie duration
+limit. A failed read gets at most two transient retries for network errors,
+408, 425, 429, 500, 502, 503, or 504. The delay is 500 ms, then 1 second,
+capped at 2 seconds, unless `Retry-After` asks for longer; the client honors
+at most 30 seconds. The retry budget follows a resumed byte offset, and
+cancellation interrupts the delay before another upstream request. A 200
+response that ignores Range remains Mediabunny's sequential streaming path.
+
+Only a cross-origin fetch `TypeError` is treated as byte access unavailable
+and eligible for proxy fallback. The browser error is ambiguous, so this does
+not claim the origin's CORS policy was proven. Readable HTTP failures and
+invalid ranges keep their status and do not trigger a duplicate proxy read.
+These rules apply to the advanced byte pipeline; native playback stays direct.
+
+Some cross-origin servers return a valid `206` while the browser hides
+`Content-Range`. The read policy accepts that case only when the readable body
+fits the requested range and any visible `Content-Length` agrees. A resumed
+range also has to match the response's visible ETag or Last-Modified validator
+and any known total size; otherwise the read stops before appending new bytes.
+
 ## Abuse posture (decided at the proxy-hardening phase)
 
 Per-client rate limiting is a Workers Rate Limit binding (`RATE_LIMITER` in

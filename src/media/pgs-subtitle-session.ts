@@ -89,6 +89,12 @@ type PgsWindowLoader = (
   signal: AbortSignal
 ) => AsyncIterable<MatroskaPgsWindowEvent>
 
+export type PgsSubtitleWindowStatus =
+  | "loading"
+  | "ready"
+  | "incomplete"
+  | "failed"
+
 const MAX_PGS_WINDOW_PACKETS = 50_000
 
 const MAX_PGS_WINDOW_BYTES = 32 * 1024 * 1024
@@ -117,6 +123,9 @@ export class PgsSubtitleSession {
     crypto.getRandomValues(new Uint32Array(1))[0] ?? 0
   private readonly worker: Worker
   private readonly listeners = new Set<(frame: PgsSubtitleFrame) => void>()
+  private readonly windowStatusListeners = new Set<
+    (status: PgsSubtitleWindowStatus) => void
+  >()
   private sequence = 0
   private readyResolve: (() => void) | null = null
   private readyReject: ((error: Error) => void) | null = null
@@ -134,6 +143,7 @@ export class PgsSubtitleSession {
   private renderWatchdog: ReturnType<typeof setTimeout> | null = null
   private staleBeforeRequestSequence = 0
   private windowLoader: PgsWindowLoader | null = null
+  private latestWindowFailureValue: MatroskaSubtitleError | null = null
   private currentWindow: { start: number; end: number } | null = null
   private activeWindowController: AbortController | null = null
   private activeWindowTarget: number | null = null
@@ -145,6 +155,7 @@ export class PgsSubtitleSession {
   private windowRetryExhausted = false
   private windowSequence = 0
   private applyingWindow = false
+  private windowStatus: PgsSubtitleWindowStatus = "loading"
 
   constructor(private readonly now: () => number = () => performance.now()) {
     this.ready = new Promise((resolve, reject) => {
@@ -180,44 +191,78 @@ export class PgsSubtitleSession {
     return () => this.listeners.delete(listener)
   }
 
+  subscribeWindowStatus(
+    listener: (status: PgsSubtitleWindowStatus) => void
+  ): () => void {
+    this.windowStatusListeners.add(listener)
+    listener(this.windowStatus)
+
+    return () => this.windowStatusListeners.delete(listener)
+  }
+
   get failed(): boolean {
     return this.failedValue
+  }
+
+  get latestWindowFailure(): MatroskaSubtitleError | null {
+    return this.latestWindowFailureValue
   }
 
   setWindowLoader(loader: PgsWindowLoader): void {
     this.windowLoader = loader
   }
 
-  retryWindow(): void {
+  retryWindow(): boolean {
     if (
       this.latestTime === null ||
       this.windowLoader === null ||
       this.disposed ||
       this.failedValue
     ) {
-      return
+      return false
     }
 
-    if (!this.upstreamAllowsWindowRequest()) {
-      return
+    if (
+      !this.upstreamAllowsWindowRequest() ||
+      this.activeWindowController !== null
+    ) {
+      return false
     }
-
-    this.failedWindowAttempts = 0
-    this.nextWindowRetryAt = 0
-    this.windowRetryExhausted = false
 
     if (
       this.currentWindow !== null &&
       this.latestTime >= this.currentWindow.start &&
       this.latestTime <= this.currentWindow.end
     ) {
-      this.attemptedPrefetchTarget = null
-      this.startWindowPrefetch(this.currentWindow.end)
+      if (this.prefetchController !== null || this.prefetchedWindow !== null) {
+        return false
+      }
 
-      return
+      this.resetWindowRetryState()
+      this.attemptedPrefetchTarget = null
+      const accepted = this.startWindowPrefetch(this.currentWindow.end)
+
+      if (accepted) {
+        this.setWindowStatus("loading")
+      }
+
+      return accepted
     }
 
-    this.ensureWindowForTime(this.latestTime)
+    this.resetWindowRetryState()
+    const accepted = this.startWindowLoad(this.latestTime)
+
+    if (accepted) {
+      this.setWindowStatus("loading")
+    }
+
+    return accepted
+  }
+
+  private resetWindowRetryState(): void {
+    this.failedWindowAttempts = 0
+    this.nextWindowRetryAt = 0
+    this.windowRetryExhausted = false
   }
 
   invalidatePendingRender(): void {
@@ -443,6 +488,8 @@ export class PgsSubtitleSession {
 
   private handleFailure(): void {
     this.failedValue = true
+    this.latestWindowFailureValue = null
+    this.setWindowStatus("failed")
     const error = new Error("Embedded PGS decoder failed.")
     this.readyReject?.(error)
     this.readyReject = null
@@ -608,6 +655,7 @@ export class PgsSubtitleSession {
   }
 
   private recordWindowFailure(error: MatroskaSubtitleError | null): void {
+    this.latestWindowFailureValue = error
     this.failedWindowAttempts += 1
 
     const retryable =
@@ -623,6 +671,9 @@ export class PgsSubtitleSession {
 
     if (!retryable) {
       this.windowRetryExhausted = true
+      this.setWindowStatus(
+        this.currentWindow === null ? "failed" : "incomplete"
+      )
 
       return
     }
@@ -636,6 +687,13 @@ export class PgsSubtitleSession {
 
     if (this.failedWindowAttempts >= MAX_PGS_WINDOW_ATTEMPTS_PER_FAILURE) {
       this.windowRetryExhausted = true
+      this.setWindowStatus(
+        this.currentWindow === null ? "failed" : "incomplete"
+      )
+    } else {
+      this.setWindowStatus(
+        this.currentWindow === null ? "loading" : "incomplete"
+      )
     }
   }
 
@@ -652,11 +710,17 @@ export class PgsSubtitleSession {
     )
   }
 
-  private startWindowLoad(time: number): void {
+  private startWindowLoad(time: number): boolean {
     const loader = this.windowLoader
 
-    if (loader === null) {
-      return
+    if (
+      loader === null ||
+      this.disposed ||
+      this.failedValue ||
+      !this.canRetryWindow() ||
+      this.hasWindowRequestFor(time)
+    ) {
+      return false
     }
 
     this.cancelCurrentWindowLoad()
@@ -665,6 +729,11 @@ export class PgsSubtitleSession {
     const sequence = ++this.windowSequence
     this.activeWindowController = controller
     this.activeWindowTarget = time
+
+    if (this.currentWindow === null) {
+      this.setWindowStatus("loading")
+    }
+
     this.notifyListeners({ kind: "clear" })
 
     void this.readWindow(loader, time, controller.signal)
@@ -692,6 +761,8 @@ export class PgsSubtitleSession {
         this.notifyListeners({ kind: "unavailable" })
       })
       .finally(() => this.clearActiveWindow(controller))
+
+    return true
   }
 
   private cancelCurrentWindowLoad(): void {
@@ -710,7 +781,7 @@ export class PgsSubtitleSession {
     }
   }
 
-  private startWindowPrefetch(targetTime: number): void {
+  private startWindowPrefetch(targetTime: number): boolean {
     if (
       this.windowLoader === null ||
       this.disposed ||
@@ -720,7 +791,7 @@ export class PgsSubtitleSession {
       this.prefetchedWindow !== null ||
       this.attemptedPrefetchTarget === targetTime
     ) {
-      return
+      return false
     }
 
     const controller = new AbortController()
@@ -751,6 +822,8 @@ export class PgsSubtitleSession {
           this.prefetchController = null
         }
       })
+
+    return true
   }
 
   private async readWindow(
@@ -774,7 +847,7 @@ export class PgsSubtitleSession {
     }
 
     if (state.boundaryTime === null || state.coverageTime === null) {
-      throw new Error("Embedded PGS window is incomplete.")
+      throw new MatroskaSubtitleError("invalid")
     }
 
     return {
@@ -871,12 +944,26 @@ export class PgsSubtitleSession {
       end: window.coverageTime,
     }
     this.failedWindowAttempts = 0
+    this.latestWindowFailureValue = null
     this.nextWindowRetryAt = 0
     this.windowRetryExhausted = false
     this.attemptedPrefetchTarget = null
+    this.setWindowStatus("ready")
 
     if (this.latestTime !== null) {
       this.requestTime(this.latestTime)
+    }
+  }
+
+  private setWindowStatus(status: PgsSubtitleWindowStatus): void {
+    if (this.windowStatus === status) {
+      return
+    }
+
+    this.windowStatus = status
+
+    for (const listener of this.windowStatusListeners) {
+      listener(status)
     }
   }
 
@@ -982,13 +1069,9 @@ export class PgsSubtitleSession {
 
     const wasFailed = this.failedValue
     this.failedValue = true
-    this.readyReject?.(error)
-    this.readyReject = null
-    this.readyResolve = null
-    this.pendingPacket?.reject(error)
-    this.pendingPacket = null
-    this.pendingWindowReset?.reject(error)
-    this.pendingWindowReset = null
+    this.latestWindowFailureValue = null
+    this.setWindowStatus("failed")
+    this.rejectPendingOperations(error)
     this.pendingTime = null
     this.latestTimeRequest = null
     this.renderOutstanding = false
@@ -1000,5 +1083,15 @@ export class PgsSubtitleSession {
     if (!wasFailed) {
       this.notifyListeners({ kind: "failed" })
     }
+  }
+
+  private rejectPendingOperations(error: Error): void {
+    this.readyReject?.(error)
+    this.readyReject = null
+    this.readyResolve = null
+    this.pendingPacket?.reject(error)
+    this.pendingPacket = null
+    this.pendingWindowReset?.reject(error)
+    this.pendingWindowReset = null
   }
 }

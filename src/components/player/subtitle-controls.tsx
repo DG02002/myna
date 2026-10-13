@@ -8,11 +8,13 @@ import type { SubtitleTrack } from "#/media/subtitles"
 export function SubtitleControls({
   tracks,
   onAddSubtitle,
+  onRetrySubtitle,
   embeddedProbeFailed,
   disabled = false,
 }: {
   tracks: SubtitleTrack[]
   onAddSubtitle: (url: string) => void
+  onRetrySubtitle: (id: string) => void
   embeddedProbeFailed: boolean
   disabled?: boolean
 }) {
@@ -64,7 +66,22 @@ export function SubtitleControls({
           {tracks
             .filter((track) => track.source.kind === "external")
             .map((track) => (
-              <SubtitleLoadStatus key={track.id} track={track} />
+              <div key={track.id} className="flex items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <SubtitleLoadStatus track={track} />
+                </div>
+                {track.status === "failed" ? (
+                  <Button
+                    aria-label={`Retry ${track.label}`}
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                    onClick={() => onRetrySubtitle(track.id)}
+                  >
+                    Retry
+                  </Button>
+                ) : null}
+              </div>
             ))}
         </div>
       </div>
@@ -74,8 +91,10 @@ export function SubtitleControls({
 
 export function SubtitlePlaybackStatus({
   track,
+  onRetry,
 }: {
   track: SubtitleTrack | undefined
+  onRetry?: (id: string) => void
 }) {
   if (
     track?.source.kind !== "matroska" ||
@@ -104,7 +123,21 @@ export function SubtitlePlaybackStatus({
           </p>
         </div>
       ) : (
-        <SubtitleLoadStatus track={track} />
+        <div className="flex items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <SubtitleLoadStatus track={track} />
+          </div>
+          {onRetry !== undefined ? (
+            <Button
+              size="sm"
+              type="button"
+              variant="ghost"
+              onClick={() => onRetry(track.id)}
+            >
+              Retry
+            </Button>
+          ) : null}
+        </div>
       )}
     </div>
   )
@@ -238,17 +271,62 @@ function SubtitleLoadStatus({ track }: { track: SubtitleTrack }) {
 
   if (track.status === "failed") {
     return (
-      <p className="text-destructive text-sm">Could not load {track.label}.</p>
+      <p className="text-destructive text-sm">
+        {subtitleFailureMessage(track)}
+      </p>
     )
   }
 
   if (track.status === "incomplete") {
     return (
       <p className="text-muted-foreground text-sm">
-        Loaded part of {track.label}; later subtitles may be missing.
+        {subtitleFailureMessage(track)}
       </p>
     )
   }
 
   return null
+}
+
+function subtitleFailureMessage(track: SubtitleTrack): string {
+  const { kind, status, retryAfterMs } = track.failure ?? {}
+
+  if (kind === "http") {
+    const retryDelay =
+      retryAfterMs === undefined || retryAfterMs === null
+        ? ""
+        : ` Try again in about ${Math.ceil(retryAfterMs / 1000)} seconds.`
+
+    return `Subtitle server returned HTTP ${status ?? "an error"}.${retryDelay}`
+  }
+
+  if (kind === "range") {
+    return `${track.label} could not be read because the server returned an invalid byte range.`
+  }
+
+  if (kind === "decode") {
+    return `Myna could not decode ${track.label}. Choose Retry to restart the subtitle decoder.`
+  }
+
+  if (kind === "limit") {
+    return `Loading ${track.label} reached its resource limit. Try a shorter subtitle source.`
+  }
+
+  if (kind === "timeout") {
+    return `Loading ${track.label} timed out.`
+  }
+
+  if (kind === "unsupported") {
+    return `${track.label} uses an unsupported subtitle format.`
+  }
+
+  if (kind === "invalid") {
+    return `${track.label} is invalid or incomplete.`
+  }
+
+  if (track.status === "incomplete") {
+    return `Part of ${track.label} loaded. Later subtitles may be missing.`
+  }
+
+  return `Could not load ${track.label}. The media source may be unavailable.`
 }

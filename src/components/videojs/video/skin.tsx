@@ -21,6 +21,7 @@ export interface VideoSkinProps extends Omit<
   "children"
 > {
   children?: ReactNode
+  onRetryPlayback?: () => void
   renderPoster?: NonNullable<ComponentProps<typeof Poster>>["renderImage"]
   renderThumbnail?: NonNullable<
     ComponentProps<typeof DefaultVideoControls>
@@ -32,6 +33,7 @@ export interface VideoSkinProps extends Omit<
 export function VideoSkin({
   children,
   className,
+  onRetryPlayback,
   renderPoster,
   renderThumbnail,
   controlsVisibility,
@@ -50,7 +52,7 @@ export function VideoSkin({
       {children}
       <Poster renderImage={renderPoster} />
       <BufferingIndicator />
-      <ErrorDialog />
+      <ErrorDialog onRetryPlayback={onRetryPlayback} />
       <Title />
 
       <DefaultVideoControls

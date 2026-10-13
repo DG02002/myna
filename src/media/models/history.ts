@@ -8,6 +8,7 @@ export interface HistoryEntry {
   id: string
   url: string
   filename: string
+  filenameConfirmed: boolean
   sizeBytes: number | null
   positionSeconds: number
   addedAt: number
@@ -24,9 +25,13 @@ const HISTORY_CHANGED_EVENT = "myna:history-changed"
 // between mutations.
 let cachedEntries: HistoryEntry[] | null = null
 
-type StoredHistoryEntry = Omit<HistoryEntry, "id" | "positionSeconds"> & {
+type StoredHistoryEntry = Omit<
+  HistoryEntry,
+  "id" | "positionSeconds" | "filenameConfirmed"
+> & {
   id?: string
   positionSeconds?: number
+  filenameConfirmed?: boolean
 }
 
 function isStoredHistoryEntry(value: unknown): value is StoredHistoryEntry {
@@ -43,6 +48,8 @@ function isStoredHistoryEntry(value: unknown): value is StoredHistoryEntry {
     typeof entry.url === "string" &&
     entry.url.length > 0 &&
     typeof entry.filename === "string" &&
+    (entry.filenameConfirmed === undefined ||
+      typeof entry.filenameConfirmed === "boolean") &&
     (entry.sizeBytes === null || typeof entry.sizeBytes === "number") &&
     (entry.positionSeconds === undefined ||
       (typeof entry.positionSeconds === "number" &&
@@ -57,13 +64,21 @@ function normalizeHistoryEntry(
   entry: StoredHistoryEntry,
   id: string
 ): HistoryEntry {
-  const { url, filename, sizeBytes, positionSeconds, addedAt, lastPlayedAt } =
-    entry
+  const {
+    url,
+    filename,
+    filenameConfirmed,
+    sizeBytes,
+    positionSeconds,
+    addedAt,
+    lastPlayedAt,
+  } = entry
 
   return {
     id,
     url,
     filename,
+    filenameConfirmed: filenameConfirmed ?? false,
     sizeBytes,
     positionSeconds: positionSeconds ?? 0,
     addedAt,
@@ -149,6 +164,7 @@ export function recordPlayedUrl(url: string): string {
         id,
         url,
         filename: existing?.filename ?? filenameFromUrl(url),
+        filenameConfirmed: existing?.filenameConfirmed ?? false,
         sizeBytes: existing?.sizeBytes ?? null,
         positionSeconds: existing?.positionSeconds ?? 0,
         addedAt: existing?.addedAt ?? now,
@@ -180,6 +196,8 @@ export function updateHistoryEntry(
     {
       ...entry,
       filename: details.filename ?? entry.filename,
+      filenameConfirmed:
+        details.filename === undefined ? entry.filenameConfirmed : true,
       sizeBytes: details.sizeBytes ?? entry.sizeBytes,
     },
     ...entries.slice(index + 1),

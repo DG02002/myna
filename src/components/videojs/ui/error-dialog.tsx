@@ -13,22 +13,39 @@ import {
 import { Button } from "#/components/videojs/ui/button.tsx"
 import { cn } from "#/lib/utils.ts"
 import {
+  isRetryablePlaybackFailure,
+  isPlaybackFailure,
   nativeMediaErrorCodeToFailure,
   playbackFailureMessage,
+  type PlaybackFailure,
 } from "#/media/models/media-errors"
 
-function usePlaybackErrorCopy() {
+function usePlaybackError() {
   const error = usePlayer(selectError)?.error
 
   if (!error) {
     return null
   }
 
-  return playbackFailureMessage(nativeMediaErrorCodeToFailure(error.code))
+  const failure: PlaybackFailure =
+    "failure" in error && isPlaybackFailure(error.failure)
+      ? error.failure
+      : nativeMediaErrorCodeToFailure(error.code)
+
+  return { failure, message: playbackFailureMessage(failure) }
 }
 
-export function ErrorDialog() {
-  const copy = usePlaybackErrorCopy()
+export function ErrorDialog({
+  onRetryPlayback,
+}: {
+  onRetryPlayback?: () => void
+}) {
+  const error = usePlaybackError()
+
+  const canRetry =
+    error !== null &&
+    onRetryPlayback !== undefined &&
+    isRetryablePlaybackFailure(error.failure)
 
   return (
     // The recovery dialog must cover controls while the error is unresolved.
@@ -60,21 +77,45 @@ export function ErrorDialog() {
           <ErrorDialogPrimitive.Title
             className={"m-0 text-media-lg font-semibold leading-tight"}
           >
-            {copy?.title ?? ""}
+            {error?.message.title ?? ""}
           </ErrorDialogPrimitive.Title>
           <ErrorDialogPrimitive.Description
             className={"m-0 opacity-70 wrap-anywhere"}
           >
-            {copy?.description ?? ""}
+            {error?.message.description ?? ""}
           </ErrorDialogPrimitive.Description>
         </div>
         <div className={"flex shrink-0 gap-2"}>
-          <ErrorDialogPrimitive.Close
-            render={<Button />}
-            className={
-              "h-media-control w-full flex-1 bg-media-primary! px-4 py-2 font-medium text-media-primary-foreground!"
-            }
-          />
+          {canRetry ? (
+            <>
+              <ErrorDialogPrimitive.Close
+                render={<Button />}
+                className={
+                  "h-media-control flex-1 px-4 py-2 font-medium text-media-popover-foreground opacity-70 hover:opacity-100"
+                }
+              >
+                Close
+              </ErrorDialogPrimitive.Close>
+              <ErrorDialogPrimitive.Close
+                render={<Button />}
+                className={
+                  "h-media-control flex-1 bg-media-primary! px-4 py-2 font-medium text-media-primary-foreground!"
+                }
+                onClick={onRetryPlayback}
+              >
+                Try again
+              </ErrorDialogPrimitive.Close>
+            </>
+          ) : (
+            <ErrorDialogPrimitive.Close
+              render={<Button />}
+              className={
+                "h-media-control w-full flex-1 bg-media-primary! px-4 py-2 font-medium text-media-primary-foreground!"
+              }
+            >
+              OK
+            </ErrorDialogPrimitive.Close>
+          )}
         </div>
       </ErrorDialogPrimitive.Popup>
     </ErrorDialogPrimitive.Root>
