@@ -7,6 +7,9 @@ export default defineConfig({
     environmentOptions: {
       happyDOM: { url: "http://localhost:3000" },
     },
-    include: ["src/components/player/playback-stage.integration.test.tsx"],
+    include: [
+      "src/components/player/playback-stage.integration.test.tsx",
+      "src/components/player/pgs-subtitle-overlay.integration.test.tsx",
+    ],
   },
 })

@@ -259,6 +259,8 @@ export function PgsSubtitleOverlay({
 
     const handleSeeked = () => {
       seeking = false
+      // The worker may have remembered a frame that the overlay dropped during seeking.
+      session.invalidatePendingRender()
       clock.updateClock()
     }
 
