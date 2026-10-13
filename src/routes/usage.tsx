@@ -61,7 +61,7 @@ function UsagePage() {
             href="https://github.com/DG02002/myna"
             target="_blank"
             rel="noreferrer"
-            className="text-white/80 underline decoration-white/30 underline-offset-4 hover:text-white"
+            className="text-white/80 underline underline-offset-4 hover:text-white"
           >
             public Myna repository
           </a>

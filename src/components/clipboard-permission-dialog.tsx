@@ -95,7 +95,7 @@ export function ClipboardPermissionDialog({
               >
                 <div className="min-h-0 overflow-hidden">
                   <div className="w-full rounded-md px-1 py-2 text-left">
-                    <span className="myna-clipboard-shimmer block max-w-full truncate text-base font-normal text-primary">
+                    <span className="shimmer shimmer-color-clipboard-shimmer shimmer-duration-3000 block max-w-full truncate text-base font-normal text-primary">
                       https://example.com/video.mkv
                     </span>
                   </div>

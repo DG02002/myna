@@ -20,33 +20,29 @@ function CookiesPage() {
           analytics, advertising, or sign-in. It uses these browser-local values
           instead:
         </p>
-        <div className="overflow-x-auto rounded-xl border border-white/10">
-          <table className="w-full min-w-xl border-collapse text-left text-base font-medium leading-relaxed tracking-wide sm:text-lg md:text-xl">
-            <thead className="bg-white/5 text-white">
+        <div className="typeset-policy-table-wrap">
+          <table>
+            <thead>
               <tr>
-                <th scope="col" className="px-4 py-3 font-medium">
-                  Browser storage
-                </th>
-                <th scope="col" className="px-4 py-3 font-medium">
-                  Purpose and duration
-                </th>
+                <th scope="col">Browser storage</th>
+                <th scope="col">Purpose and duration</th>
               </tr>
             </thead>
-            <tbody className="text-white/80">
+            <tbody>
               <tr>
-                <th scope="row" className="px-4 py-3 font-mono font-normal">
-                  localStorage: myna.history.v1
+                <th scope="row">
+                  <code>localStorage: myna.history.v1</code>
                 </th>
-                <td className="px-4 py-3">
+                <td>
                   Saves up to 50 recent media links and related playback details
                   until you remove them or clear this site’s browser storage.
                 </td>
               </tr>
               <tr>
-                <th scope="row" className="px-4 py-3 font-mono font-normal">
-                  localStorage: theme
+                <th scope="row">
+                  <code>localStorage: theme</code>
                 </th>
-                <td className="px-4 py-3">
+                <td>
                   A display preference read by the app when present. It remains
                   in browser storage until changed or cleared.
                 </td>
@@ -92,7 +88,7 @@ function CookiesPage() {
             href="https://www.cloudflare.com/privacypolicy/"
             target="_blank"
             rel="noreferrer"
-            className="text-white/80 underline decoration-white/30 underline-offset-4 hover:text-white"
+            className="text-white/80 underline underline-offset-4 hover:text-white"
           >
             privacy information
           </a>{" "}

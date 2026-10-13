@@ -55,14 +55,13 @@ const DEMO_SUBTITLE_TRACKS: SubtitleTrack[] = [
   },
 ]
 
-// The stills the demo player rotates through, each carrying its ambient
-// swatch (cast behind the hero) and its own subtitle
-// set in the three render formats. All webp, all local — the page never
-// streams media.
+// Each still carries a small color palette for the Plasma background and
+// subtitle lines in the three render formats. All images are local WebP
+// files, so the page never streams media.
 export const DEMO_POSTERS = [
   {
     src: "/demo/12-angry-men.webp",
-    ambient: ["#514949", "#5e5454"],
+    palette: ["#514949", "#5e5454"],
     width: 1600,
     height: 960,
     subtitles: {
@@ -73,7 +72,7 @@ export const DEMO_POSTERS = [
   },
   {
     src: "/demo/mindhunter.webp",
-    ambient: ["#23322e", "#24312d"],
+    palette: ["#23322e", "#24312d"],
     width: 1600,
     height: 727,
     subtitles: {
@@ -84,7 +83,7 @@ export const DEMO_POSTERS = [
   },
   {
     src: "/demo/frieren.webp",
-    ambient: ["#9a5e74", "#9e6a44"],
+    palette: ["#9a5e74", "#9e6a44"],
     width: 1600,
     height: 900,
     subtitles: {
@@ -95,7 +94,7 @@ export const DEMO_POSTERS = [
   },
   {
     src: "/demo/solo-leveling.webp",
-    ambient: ["#730600", "#6e0003"],
+    palette: ["#730600", "#6e0003"],
     width: 1600,
     height: 900,
     subtitles: {
@@ -106,7 +105,7 @@ export const DEMO_POSTERS = [
   },
   {
     src: "/demo/taxi-driver.webp",
-    ambient: ["#210e02", "#351d01"],
+    palette: ["#210e02", "#351d01"],
     width: 1600,
     height: 860,
     subtitles: {

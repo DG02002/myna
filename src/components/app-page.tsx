@@ -239,7 +239,7 @@ export function AppPage() {
               }}
               className="w-full rounded-md px-1 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <span className="myna-clipboard-shimmer block max-w-full truncate text-base font-normal text-primary">
+              <span className="shimmer shimmer-color-blue-500/60 shimmer-duration-3000 block max-w-full truncate text-base font-normal text-primary">
                 {clipboardSuggestion}
               </span>
             </button>

@@ -7,6 +7,7 @@ import { defineConfig } from "vite"
 
 const config = defineConfig({
   resolve: { tsconfigPaths: true },
+  server: { watch: { ignored: ["**/.repos/**"] } },
   plugins: [
     devtools(),
     cloudflare({ viteEnvironment: { name: "ssr" } }),

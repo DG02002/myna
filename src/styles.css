@@ -4,6 +4,11 @@
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
 @import "@fontsource-variable/orbitron";
+@import "@fontsource/rajdhani/400.css";
+@import "@fontsource/rajdhani/500.css";
+@import "@fontsource/rajdhani/600.css";
+@import "@fontsource/rajdhani/700.css";
+@import "./typeset.css";
 
 /* A quick tone dip gives every site action a clear press state. */
 .myna-shell
@@ -17,7 +22,6 @@
 @plugin "@tailwindcss/typography";
 
 :root {
-  --color-clipboard-shimmer: oklch(0.623 0.214 259.815);
   --color-cyber-yellow: #fcee0a;
   --color-cyber-yellow-light: #fff84a;
   --color-cyber-cyan: #00f0ff;
@@ -28,6 +32,16 @@
   --color-chrome-stop-3: #64748b;
   --color-chrome-stop-4: #f8fafc;
   --color-chrome-stop-5: #94a3b8;
+  --color-link-underline: color-mix(
+    in srgb,
+    var(--color-chrome-stop-2) 55%,
+    transparent
+  );
+  --color-selection-background: color-mix(
+    in srgb,
+    var(--color-chrome-stop-2) 16%,
+    transparent
+  );
   --subtitle-ass: #38bdf8;
   --radius: 0.625rem;
   --background: oklch(1 0 0);
@@ -64,7 +78,10 @@
 }
 
 @theme inline {
-  --font-sans: "Orbitron Variable", "Orbitron", sans-serif;
+  --font-sans: "Rajdhani", sans-serif;
+  --font-display: "Orbitron Variable", "Orbitron", sans-serif;
+  --text-body-lg: 1.375rem;
+  --color-clipboard-shimmer: #378add;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -207,28 +224,6 @@
   user-select: none;
   vertical-align: middle;
   overflow: visible;
-}
-
-.myna-clipboard-shimmer {
-  color: transparent;
-  background-image: linear-gradient(
-    110deg,
-    var(--primary) 0%,
-    var(--primary) 42%,
-    color-mix(in oklab, var(--primary), transparent 45%) 50%,
-    var(--primary) 58%,
-    var(--primary) 100%
-  );
-  background-position: 100% 0;
-  background-size: 250% 100%;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  -webkit-background-clip: text;
-  animation: none;
-}
-
-.myna-clipboard-suggestion[data-visible="true"] .myna-clipboard-shimmer {
-  animation: myna-clipboard-shimmer 1.3s ease-in-out forwards;
 }
 
 .myna-link-input {
@@ -429,7 +424,7 @@
 }
 
 [data-shimmer-visible="true"] .myna-clipboard-icon-shimmer {
-  animation: myna-clipboard-icon-shimmer 1.3s ease-in-out forwards;
+  animation: myna-clipboard-icon-shimmer 3s linear infinite;
 }
 
 @keyframes myna-clipboard-icon-shimmer {
@@ -438,22 +433,9 @@
   }
 }
 
-@keyframes myna-clipboard-shimmer {
-  to {
-    background-position: -100% 0;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .myna-clipboard-suggestion {
     transition: none;
-  }
-
-  .myna-clipboard-shimmer {
-    color: var(--primary);
-    background: none;
-    -webkit-text-fill-color: var(--primary);
-    animation: none;
   }
 
   .myna-clipboard-icon-shimmer {
@@ -602,6 +584,49 @@
   overflow: hidden;
 }
 
+.myna-format-description {
+  margin-block-start: 1.5rem;
+}
+
+.myna-format-supported {
+  margin-block-start: 2rem;
+}
+
+.myna-format-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-block-start: 1rem;
+}
+
+.myna-format-unsupported {
+  margin-block-start: 2.5rem;
+  border-block-start: 1px solid rgb(255 255 255 / 0.1);
+  padding-block-start: 1.5rem;
+}
+
+@media (min-width: 40rem) {
+  .myna-format-supported {
+    margin-block-start: 2.5rem;
+  }
+
+  .myna-format-unsupported {
+    margin-block-start: 3rem;
+  }
+}
+
+@media (min-width: 48rem) {
+  .myna-format-grid {
+    grid-template-rows: repeat(4, auto);
+  }
+
+  .myna-format-column {
+    display: grid;
+    grid-row: span 4;
+    grid-template-rows: subgrid;
+  }
+}
+
 /* The hero's stage: text sits at prose width, the player breaks out to
    this wider measure. */
 .myna-stage {
@@ -693,232 +718,71 @@
   }
 }
 
-/* The ambient swatches are registered colors, so the hero can fade them
-   from reel to reel — a slow dissolve, never a jump. Browsers without
-   @property fall back to the pools' own background-color transition. */
-@property --ambient-a {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #000000;
-}
-
-@property --ambient-b {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #000000;
-}
-
-/* Fades engage only after the first swatch has landed, so a refresh
-   starts in the still's own colors instead of fading in from the
-   fallback. */
-.myna-section-hero.myna-ambient-live {
-  transition:
-    --ambient-a 1200ms cubic-bezier(0.16, 1, 0.3, 1),
-    --ambient-b 1200ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-/* Ambient light — three pools that never sit still: one drifting in from
-   each flank and a wide wash across the middle, so no part of the hero
-   goes dark. Color comes from the still on screen (the --ambient-*
-   properties from the reel) and each pool drifts on its own slow clock. */
-@utility myna-ambient-a {
+@utility myna-plasma-scrim {
   position: absolute;
-  border-radius: 50%;
-  filter: blur(80px);
-  pointer-events: none;
-  transition: background-color 1200ms cubic-bezier(0.16, 1, 0.3, 1);
-  will-change: transform;
-  top: -6%;
-  left: -9%;
-  width: 56%;
-  aspect-ratio: 1 / 1.5;
-  background-color: var(--ambient-a, #000000);
-  opacity: 0.45;
-  animation: myna-ambient-drift-a 16s ease-in-out -3s infinite alternate;
-}
-
-@utility myna-ambient-b {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(80px);
-  pointer-events: none;
-  transition: background-color 1200ms cubic-bezier(0.16, 1, 0.3, 1);
-  will-change: transform;
-  top: 30%;
-  right: -9%;
-  width: 56%;
-  aspect-ratio: 1 / 1.5;
-  background-color: var(--ambient-b, #000000);
-  opacity: 0.4;
-  animation: myna-ambient-drift-b 21s ease-in-out -9s infinite alternate;
-}
-
-@utility myna-ambient-c {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(80px);
-  pointer-events: none;
-  transition: background-color 1200ms cubic-bezier(0.16, 1, 0.3, 1);
-  will-change: transform;
-  bottom: -16%;
-  left: 11%;
-  width: 78%;
-  aspect-ratio: 2.4 / 1;
-  background-color: color-mix(
-    in srgb,
-    var(--ambient-a, #000000),
-    var(--ambient-b, #000000)
-  );
-  opacity: 0.35;
-  animation: myna-ambient-drift-c 26s ease-in-out -12s infinite alternate;
-}
-
-@keyframes myna-ambient-drift-a {
-  from {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-
-  to {
-    transform: translate3d(7%, 5%, 0) scale(1.14);
-  }
-}
-
-@keyframes myna-ambient-drift-b {
-  from {
-    transform: translate3d(0, 0, 0) scale(1.08);
-  }
-
-  to {
-    transform: translate3d(-6%, 6%, 0) scale(1);
-  }
-}
-
-@keyframes myna-ambient-drift-c {
-  from {
-    transform: translate3d(-3%, 0, 0) scale(1);
-  }
-
-  to {
-    transform: translate3d(3%, -3%, 0) scale(1.1);
-  }
-}
-
-/* Cinema player ambient backlight — casts direct, vibrant edge-matched
-   light from behind the video player onto the surrounding surface. */
-@utility myna-player-ambient {
-  position: absolute;
-  inset: -20px;
-  pointer-events: none;
-  /* The backlight belongs behind the hero player frame. */
-  z-index: -10;
-  overflow: visible;
-
-  @media (min-width: 640px) {
-    inset: -36px;
-  }
-
-  @media (min-width: 1024px) {
-    inset: -52px;
-  }
-}
-
-/* Micro-dither grain mask specifically over the ambient glow to eliminate
-   8-bit color banding rings and smooth out edge transitions. */
-.myna-player-ambient::after {
-  content: "";
-  position: absolute;
-  inset: -25%;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  opacity: 0.18;
-  mix-blend-mode: overlay;
-  pointer-events: none;
-}
-
-@utility myna-player-ambient-glow {
-  position: absolute;
-  inset: -12%;
-  border-radius: 40px;
-  filter: blur(56px);
-  pointer-events: none;
-  opacity: 0.9;
+  z-index: 1;
+  inset: 0;
   background:
-    radial-gradient(
-      ellipse 70% 85% at 18% 50%,
-      var(--ambient-a, #000000) 0%,
-      color-mix(in srgb, var(--ambient-a, #000000) 80%, transparent) 22%,
-      color-mix(in srgb, var(--ambient-a, #000000) 52%, transparent) 42%,
-      color-mix(in srgb, var(--ambient-a, #000000) 26%, transparent) 62%,
-      color-mix(in srgb, var(--ambient-a, #000000) 8%, transparent) 80%,
-      transparent 100%
-    ),
-    radial-gradient(
-      ellipse 70% 85% at 82% 50%,
-      var(--ambient-b, #000000) 0%,
-      color-mix(in srgb, var(--ambient-b, #000000) 80%, transparent) 22%,
-      color-mix(in srgb, var(--ambient-b, #000000) 52%, transparent) 42%,
-      color-mix(in srgb, var(--ambient-b, #000000) 26%, transparent) 62%,
-      color-mix(in srgb, var(--ambient-b, #000000) 8%, transparent) 80%,
-      transparent 100%
+    radial-gradient(ellipse at 50% 20%, transparent 0%, rgb(0 0 0 / 0.12) 72%),
+    linear-gradient(
+      180deg,
+      rgb(0 0 0 / 0.2) 0%,
+      rgb(0 0 0 / 0.08) 38%,
+      rgb(0 0 0 / 0.4) 72%,
+      rgb(0 0 0 / 0.72) 100%
     );
-  transition: background 1200ms cubic-bezier(0.16, 1, 0.3, 1);
-  will-change: transform;
-  animation: myna-player-ambient-breathe 16s ease-in-out infinite alternate;
 }
 
-@keyframes myna-player-ambient-breathe {
-  from {
-    transform: scale(1);
-  }
+@utility myna-plasma-hero-bleed {
+  top: -5.75rem;
 
-  to {
-    transform: scale(1.04) translate3d(0, 1%, 0);
+  @media (min-width: 40rem) {
+    top: -4.75rem;
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .myna-ambient-a,
-  .myna-ambient-b,
-  .myna-ambient-c,
-  .myna-player-ambient-glow {
-    animation: none;
-  }
+@utility myna-home-footer {
+  isolation: isolate;
+  background-color: #000000;
+  color: white;
 }
 
-/* Neutral light pool behind the hero player. Reduced motion keeps it
-   static. */
-@utility myna-glow {
+@utility myna-home-footer-backdrop {
   position: absolute;
-  bottom: -35%;
-  aspect-ratio: 2 / 1;
-  border-radius: 50%;
-  filter: blur(72px);
+  inset-inline: 0;
+  top: -13rem;
+  bottom: 0;
+  overflow: hidden;
   pointer-events: none;
+
+  @media (min-width: 40rem) {
+    top: -15rem;
+  }
 }
 
-@utility myna-glow-neutral {
-  left: 50%;
-  width: 66%;
-  background: radial-gradient(
-    ellipse at center,
-    oklch(0.9 0.02 240 / 0.05),
-    transparent 70%
+@utility myna-home-footer-gradient {
+  opacity: 0.82;
+  mask-image: linear-gradient(to bottom, transparent, black 70%);
+}
+
+@utility myna-home-footer-content {
+  color: rgb(245 245 245 / 0.92);
+  text-shadow:
+    0 1px 3px rgb(0 0 0 / 0.95),
+    0 0 10px rgb(0 0 0 / 0.45);
+}
+
+@utility myna-home-footer-scrim {
+  background: linear-gradient(
+    180deg,
+    rgb(0 0 0 / 0.16),
+    transparent 42%,
+    rgb(0 0 0 / 0.2)
   );
-  animation: myna-glow-drift-a 16s ease-in-out infinite alternate;
 }
 
-@keyframes myna-glow-drift-a {
-  from {
-    transform: translate(-50%, 0) scale(1);
-  }
-  to {
-    transform: translate(-50%, 4%) scale(1.12);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .myna-glow {
-    animation: none;
-  }
+@utility myna-plasma-opacity-68 {
+  opacity: 0.68;
 }
 
 .dark {
@@ -959,11 +823,38 @@
   * {
     @apply border-border outline-ring/50;
   }
+  ::selection {
+    color: inherit;
+    background-color: var(--color-selection-background);
+  }
+  .myna-shell :where(a[href]) {
+    text-decoration-color: var(--color-link-underline);
+    text-decoration-thickness: 2px;
+    text-underline-position: from-font;
+  }
   body {
     @apply bg-background text-foreground;
+    line-height: 1.5;
   }
   html {
     @apply font-sans;
+  }
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+  }
+  button,
+  [data-slot="button"],
+  [role="button"] {
+    font-family: var(--font-display);
+  }
+  .myna-shell .media-skin {
+    --media-font-family: var(--font-sans);
+    font-weight: 500;
+  }
+  .myna-shell .media-skin :is(h1, h2, h3, h4, h5, h6, button, [role="button"]) {
+    font-family: var(--font-sans);
   }
 }
 
@@ -982,8 +873,7 @@
 @utility font-media {
   font-family: var(
     --media-font-family,
-    "Inter Variable",
-    Inter,
+    "Rajdhani",
     ui-sans-serif,
     system-ui,
     sans-serif

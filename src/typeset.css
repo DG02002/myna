@@ -1,0 +1,151 @@
+.typeset {
+  --typeset-font-body: var(--font-sans);
+  --typeset-font-heading: var(--font-display);
+  --typeset-font-mono: "Geist Mono Variable", monospace;
+  --typeset-size: 1rem;
+  --typeset-leading: 1.6;
+  --typeset-flow: 1.25em;
+  --typeset-weight: 400;
+  --typeset-heading-gap: 0.75em;
+
+  font-family: var(--typeset-font-body);
+  font-size: var(--typeset-size);
+  font-weight: var(--typeset-weight);
+  line-height: var(--typeset-leading);
+}
+
+.typeset :where(h1, h2, h3, h4, h5, h6) {
+  font-family: var(--typeset-font-heading);
+  line-height: 1.2;
+}
+
+.typeset :where(code, kbd, samp, pre) {
+  font-family: var(--typeset-font-mono);
+}
+
+.typeset-flow > * + * {
+  margin-block-start: var(--typeset-flow);
+}
+
+.typeset-marketing {
+  --typeset-size: var(--text-body-lg);
+  --typeset-leading: 1.625;
+  --typeset-flow: 1.25em;
+  --typeset-weight: 500;
+}
+
+.typeset-hero {
+  --typeset-heading-gap: 2rem;
+}
+
+.typeset-hero > :where(h1, h2, h3, h4, h5, h6) + * {
+  margin-block-start: var(--typeset-heading-gap);
+}
+
+.typeset-policy-page {
+  --typeset-policy-page-padding-block-start: clamp(3.5rem, 5vw, 4rem);
+  --typeset-policy-page-padding-block-end: clamp(5rem, 7vw, 6rem);
+  --typeset-policy-page-padding-inline: clamp(1.5rem, 5vw, 2rem);
+
+  padding-block-start: var(--typeset-policy-page-padding-block-start);
+  padding-block-end: var(--typeset-policy-page-padding-block-end);
+  padding-inline: var(--typeset-policy-page-padding-inline);
+}
+
+.typeset-policy {
+  --typeset-size: var(--text-body-lg);
+  --typeset-leading: 1.625;
+  --typeset-flow: 1.25em;
+  --typeset-weight: 500;
+  --typeset-policy-title-gap: 1.5rem;
+  --typeset-policy-content-gap: 3em;
+  --typeset-policy-section-gap: 2.75em;
+  --typeset-policy-heading-gap: 2em;
+  --typeset-policy-table-cell-padding-block: 0.65em;
+  --typeset-policy-table-cell-padding-inline: 1em;
+}
+
+.typeset-policy-header {
+  margin-block-end: var(--typeset-policy-content-gap);
+}
+
+.typeset-policy-updated + h1 {
+  margin-block-start: var(--typeset-policy-title-gap);
+}
+
+.typeset-policy-header h1 + * {
+  margin-block-start: var(--typeset-policy-heading-gap);
+}
+
+.typeset-policy-updated {
+  color: rgb(255 255 255 / 0.6);
+}
+
+.typeset-policy-content > * + * {
+  margin-block-start: var(--typeset-policy-section-gap);
+}
+
+.typeset-policy-section > :where(h1, h2, h3, h4, h5, h6) + * {
+  margin-block-start: var(--typeset-policy-heading-gap);
+}
+
+.typeset-policy :where(code, kbd, samp) {
+  overflow-wrap: break-word;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 0.35em;
+  background: rgb(255 255 255 / 0.06);
+  padding: 0.08em 0.35em;
+  color: rgb(255 255 255 / 0.92);
+  font-size: 0.9em;
+}
+
+.typeset-policy pre :where(code, kbd, samp) {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.typeset-policy-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: 0.75rem;
+}
+
+.typeset-policy-table-wrap table {
+  width: 100%;
+  min-width: 36rem;
+  border-collapse: collapse;
+  text-align: start;
+}
+
+.typeset-policy-table-wrap th,
+.typeset-policy-table-wrap td {
+  padding: var(--typeset-policy-table-cell-padding-block)
+    var(--typeset-policy-table-cell-padding-inline);
+  border-block-end: 1px solid rgb(255 255 255 / 0.12);
+  text-align: start;
+  vertical-align: top;
+}
+
+.typeset-policy-table-wrap thead {
+  background: rgb(255 255 255 / 0.06);
+  color: white;
+}
+
+.typeset-policy-table-wrap thead th {
+  font-weight: 600;
+}
+
+.typeset-policy-table-wrap tbody {
+  color: rgb(255 255 255 / 0.8);
+}
+
+.typeset-policy-table-wrap tbody th[scope="row"] {
+  font-weight: 500;
+}
+
+.typeset-policy-table-wrap tbody tr:last-child > * {
+  border-block-end: 0;
+}

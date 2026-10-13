@@ -69,7 +69,7 @@ function PrivacyPage() {
             href="https://developers.cloudflare.com/workers/observability/logs/workers-logs/"
             target="_blank"
             rel="noreferrer"
-            className="text-white/80 underline decoration-white/30 underline-offset-4 hover:text-white"
+            className="text-white/80 underline underline-offset-4 hover:text-white"
           >
             Cloudflare Workers Logs documentation
           </a>
@@ -113,7 +113,7 @@ function PrivacyPage() {
             href="https://www.cloudflare.com/privacypolicy/"
             target="_blank"
             rel="noreferrer"
-            className="text-white/80 underline decoration-white/30 underline-offset-4 hover:text-white"
+            className="text-white/80 underline underline-offset-4 hover:text-white"
           >
             Privacy Policy
           </a>
@@ -132,7 +132,7 @@ function PrivacyPage() {
             href="https://github.com/DG02002/myna"
             target="_blank"
             rel="noreferrer"
-            className="text-white/80 underline decoration-white/30 underline-offset-4 hover:text-white"
+            className="text-white/80 underline underline-offset-4 hover:text-white"
           >
             public Myna repository
           </a>
