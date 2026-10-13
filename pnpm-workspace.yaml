@@ -55,6 +55,8 @@ minimumReleaseAgeExclude:
   - '@videojs/store@10.0.1'
   - '@videojs/utils@10.0.1'
   - '@videojs/hlsjs-video@10.0.1'
+  - '@base-ui/react@1.9.0'
+  - '@base-ui/utils@0.5.0'
 minimumReleaseAgeIgnoreMissingTime: false
 minimumReleaseAgeStrict: false
 

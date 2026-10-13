@@ -54,13 +54,14 @@ export function SubtitleControls({
               placeholder="https://example.com/subtitles.vtt"
             />
           </div>
-          <Button type="submit">Add</Button>
+          <Button type="submit">Add subtitle</Button>
         </form>
 
         <div className="space-y-2" aria-live="polite">
           {embeddedProbeFailed ? (
-            <p className="text-destructive text-xs">
-              Could not inspect embedded subtitles.
+            <p className="text-destructive text-base">
+              Couldn&apos;t inspect embedded subtitles. Add a subtitle URL
+              instead.
             </p>
           ) : null}
           {tracks
@@ -215,7 +216,7 @@ function subtitleLoadingLabel(track: SubtitleTrack): SubtitleLoadingLabel {
 
     if (progress.totalBytes !== null && progress.totalBytes > 0) {
       return {
-        text: `Downloading ${track.label} — ${loaded} of ${formatFileSize(progress.totalBytes)}`,
+        text: `Downloading ${track.label} (${loaded} of ${formatFileSize(progress.totalBytes)})`,
         percent: Math.min(
           100,
           (progress.loadedBytes / progress.totalBytes) * 100
@@ -224,7 +225,7 @@ function subtitleLoadingLabel(track: SubtitleTrack): SubtitleLoadingLabel {
     }
 
     return {
-      text: `Downloading ${track.label} — ${loaded} so far`,
+      text: `Downloading ${track.label} (${loaded} so far)`,
       percent: null,
     }
   }
@@ -297,36 +298,36 @@ function subtitleFailureMessage(track: SubtitleTrack): string {
         ? ""
         : ` Try again in about ${Math.ceil(retryAfterMs / 1000)} seconds.`
 
-    return `Subtitle server returned HTTP ${status ?? "an error"}.${retryDelay}`
+    return `Couldn't load ${track.label}. The subtitle server returned HTTP ${status ?? "an error"}.${retryDelay}`
   }
 
   if (kind === "range") {
-    return `${track.label} could not be read because the server returned an invalid byte range.`
+    return `Couldn't read ${track.label}. The media server returned an invalid byte range.`
   }
 
   if (kind === "decode") {
-    return `Myna could not decode ${track.label}. Choose Retry to restart the subtitle decoder.`
+    return `Myna couldn't decode ${track.label}. Select Retry to try again.`
   }
 
   if (kind === "limit") {
-    return `Loading ${track.label} reached its resource limit. Try a shorter subtitle source.`
+    return `${track.label} reached the subtitle size limit. Try a smaller file.`
   }
 
   if (kind === "timeout") {
-    return `Loading ${track.label} timed out.`
+    return `Loading ${track.label} timed out. Check the URL and try again.`
   }
 
   if (kind === "unsupported") {
-    return `${track.label} uses an unsupported subtitle format.`
+    return `${track.label} uses an unsupported subtitle format. Use UTF-8 SRT or WebVTT.`
   }
 
   if (kind === "invalid") {
-    return `${track.label} is invalid or incomplete.`
+    return `${track.label} is invalid or incomplete. Check the file and try again.`
   }
 
   if (track.status === "incomplete") {
     return `Part of ${track.label} loaded. Later subtitles may be missing.`
   }
 
-  return `Could not load ${track.label}. The media source may be unavailable.`
+  return `Couldn't load ${track.label}. Check the source and try again.`
 }

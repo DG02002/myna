@@ -1,10 +1,7 @@
-import {
-  ArrowRight02Icon,
-  Delete02Icon,
-  PlayIcon,
-} from "@hugeicons/core-free-icons"
+import { ArrowRight02Icon, Delete02Icon } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 import { useNavigate } from "@tanstack/react-router"
+import { AlertDialog } from "radix-ui"
 import {
   useCallback,
   useEffect,
@@ -18,6 +15,7 @@ import {
   ClipboardAccessIcon,
   ClipboardPermissionDialog,
 } from "#/components/clipboard-permission-dialog"
+import { Button } from "#/components/ui/button"
 import {
   InputGroup,
   InputGroupAddon,
@@ -212,7 +210,7 @@ export function AppPage() {
   )
 
   return (
-    <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-6 py-12 sm:py-16 md:px-8 lg:px-8">
+    <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-6 pt-10 pb-12 sm:pt-14 sm:pb-16 md:px-8 lg:px-8">
       <form className="flex w-full flex-col gap-3" onSubmit={submit} noValidate>
         <label htmlFor="media-url" className="sr-only">
           Media URL
@@ -289,7 +287,7 @@ export function AppPage() {
                   >
                     <ClipboardAccessIcon
                       key={clipboardSuggestion ?? "idle"}
-                      className="size-6"
+                      className="size-7"
                       shimmerVisible
                     />
                   </InputGroupButton>
@@ -315,7 +313,7 @@ export function AppPage() {
           <p
             id="media-url-error"
             role="alert"
-            className="text-destructive mt-2 px-5 text-sm"
+            className="text-destructive mt-2 px-5 text-base"
           >
             {message.description}
           </p>
@@ -324,7 +322,7 @@ export function AppPage() {
           <p
             id="clipboard-error"
             role="alert"
-            className="text-destructive px-5 text-sm"
+            className="text-destructive px-5 text-base"
           >
             {clipboardMessage}
           </p>
@@ -358,8 +356,12 @@ function PlayedList({
   onRemove: (url: string) => void
   onClear: () => void
 }) {
-  const [confirmingClear, setConfirmingClear] = useState(false)
   const [requestedPage, setRequestedPage] = useState(1)
+
+  if (entries.length === 0) {
+    return null
+  }
+
   const pageCount = Math.max(1, Math.ceil(entries.length / HISTORY_PAGE_SIZE))
   const page = Math.min(requestedPage, pageCount)
 
@@ -368,88 +370,31 @@ function PlayedList({
     page * HISTORY_PAGE_SIZE
   )
 
-  const clearTimer = useRef<number | null>(null)
-
-  useEffect(() => {
-    return () => {
-      if (clearTimer.current !== null) {
-        window.clearTimeout(clearTimer.current)
-      }
-    }
-  }, [])
-
   return (
-    <section className="mt-14" aria-labelledby="recently-played-title">
+    <section className="mt-14" aria-labelledby="recent-title">
       <header className="mb-6 flex items-center justify-between gap-4">
-        <h2
-          id="recently-played-title"
-          className="text-2xl font-medium tracking-tight"
-        >
-          Recently played
+        <h2 id="recent-title" className="text-2xl font-medium tracking-tight">
+          Recent
         </h2>
-        {entries.length > 0 ? (
-          <ClearAllButton
-            confirming={confirmingClear}
-            onCancel={() => {
-              if (clearTimer.current !== null) {
-                window.clearTimeout(clearTimer.current)
-              }
-
-              setConfirmingClear(false)
-            }}
-            onConfirm={() => {
-              if (clearTimer.current !== null) {
-                window.clearTimeout(clearTimer.current)
-              }
-
-              onClear()
-
-              setConfirmingClear(false)
-            }}
-            onRequestConfirm={() => {
-              setConfirmingClear(true)
-
-              // Expire the confirmation so a stray click cannot clear later.
-              if (clearTimer.current !== null) {
-                window.clearTimeout(clearTimer.current)
-              }
-
-              clearTimer.current = window.setTimeout(
-                () => setConfirmingClear(false),
-                4000
-              )
-            }}
-          />
-        ) : null}
+        <ClearAllButton onClear={onClear} />
       </header>
-      {entries.length === 0 ? (
-        <div className="py-14 text-center">
-          <h3 className="text-lg font-medium">No media played yet</h3>
-          <p className="text-muted-foreground mt-2 text-sm leading-relaxed">
-            Play a media link and it will appear here.
-          </p>
-        </div>
-      ) : (
-        <>
-          <ul className="border-t border-border/70">
-            {visibleEntries.map((entry) => (
-              <PlayedRow
-                key={entry.id}
-                entry={entry}
-                onPlay={() => onPlay(entry.url)}
-                onRemove={() => onRemove(entry.url)}
-              />
-            ))}
-          </ul>
-          {pageCount > 1 ? (
-            <HistoryPagination
-              page={page}
-              pageCount={pageCount}
-              onPageChange={setRequestedPage}
-            />
-          ) : null}
-        </>
-      )}
+      <ul className="border-t border-border/70">
+        {visibleEntries.map((entry) => (
+          <PlayedRow
+            key={entry.id}
+            entry={entry}
+            onPlay={() => onPlay(entry.url)}
+            onRemove={() => onRemove(entry.url)}
+          />
+        ))}
+      </ul>
+      {pageCount > 1 ? (
+        <HistoryPagination
+          page={page}
+          pageCount={pageCount}
+          onPageChange={setRequestedPage}
+        />
+      ) : null}
     </section>
   )
 }
@@ -472,21 +417,18 @@ function PlayedRow({
     .join(" · ")
 
   return (
-    <li className="myna-history-row grid min-h-20 gap-3 border-b border-border/70 transition-colors duration-150 hover:bg-muted/30 sm:gap-4">
+    <li className="myna-history-row grid min-h-28 gap-3 border-b border-border/70 transition-colors duration-150 hover:bg-muted/30 sm:gap-4">
       <button
         type="button"
         onClick={onPlay}
         aria-label={`Play ${entry.filename}`}
-        className="myna-history-play grid min-w-0 items-center py-4 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        className="flex min-w-0 flex-col justify-center py-6 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
-        <span className="text-muted-foreground flex items-center justify-center">
-          <HugeiconsIcon icon={PlayIcon} className="size-5" />
-        </span>
-        <span className="min-w-0">
-          <span className="text-foreground block truncate text-base font-medium">
+        <span className="flex min-w-0 flex-col gap-2">
+          <span className="myna-history-filename text-foreground block truncate font-medium">
             <bdi>{entry.filename}</bdi>
           </span>
-          <span className="text-muted-foreground block truncate text-xs tabular-nums">
+          <span className="text-muted-foreground block truncate text-lg tabular-nums sm:text-xl">
             {meta}
           </span>
         </span>
@@ -497,7 +439,7 @@ function PlayedRow({
         aria-label={`Remove ${entry.filename} from history`}
         className="text-muted-foreground hover:text-destructive flex w-full items-center justify-center outline-none transition-colors duration-150 hover:bg-destructive/10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
-        <HugeiconsIcon icon={Delete02Icon} className="size-4" />
+        <HugeiconsIcon icon={Delete02Icon} className="size-4.5 sm:size-5" />
       </button>
     </li>
   )
@@ -533,48 +475,41 @@ function getFormFeedback(
   return { invalid, message, describedBy }
 }
 
-function ClearAllButton({
-  confirming,
-  onRequestConfirm,
-  onConfirm,
-  onCancel,
-}: {
-  confirming: boolean
-  onRequestConfirm: () => void
-  onConfirm: () => void
-  onCancel: () => void
-}) {
-  if (confirming) {
-    return (
-      <span className="flex items-center gap-2 text-xs">
-        <span className="text-muted-foreground">Remove all links?</span>
-        <button
-          type="button"
-          onClick={onConfirm}
-          autoFocus
-          className="text-destructive font-medium underline underline-offset-2"
-        >
-          Remove
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="text-muted-foreground underline underline-offset-2"
-        >
-          Keep
-        </button>
-      </span>
-    )
-  }
+function ClearAllButton({ onClear }: { onClear: () => void }) {
+  const [open, setOpen] = useState(false)
 
   return (
-    <button
-      type="button"
-      onClick={onRequestConfirm}
-      className="text-muted-foreground hover:text-foreground text-xs underline-offset-2 hover:underline"
-    >
-      Clear all
-    </button>
+    <span className="myna-history-clear">
+      <AlertDialog.Root open={open} onOpenChange={setOpen}>
+        <AlertDialog.Trigger asChild>
+          <Button type="button" variant="destructive">
+            Clear history
+          </Button>
+        </AlertDialog.Trigger>
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm" />
+          <AlertDialog.Content className="dark myna-alert-dialog-content fixed top-1/2 left-1/2 z-50 -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-4xl border bg-background text-foreground shadow-lg">
+            <div className="flex flex-col px-8 py-8 text-center sm:px-10">
+              <AlertDialog.Title className="w-full text-2xl leading-tight font-medium">
+                Clear all playback history?
+              </AlertDialog.Title>
+              <div className="myna-history-dialog-actions mt-6 flex w-full flex-col gap-3">
+                <AlertDialog.Action asChild>
+                  <Button variant="destructive" size="lg" onClick={onClear}>
+                    Clear history
+                  </Button>
+                </AlertDialog.Action>
+                <AlertDialog.Cancel asChild>
+                  <Button variant="outline" size="lg">
+                    Cancel
+                  </Button>
+                </AlertDialog.Cancel>
+              </div>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
+    </span>
   )
 }
 
@@ -596,7 +531,7 @@ function HistoryPagination({
 
   return (
     <div className="myna-history-pagination mt-6">
-      <Pagination aria-label="Recently played pages">
+      <Pagination aria-label="Recent pages">
         <PaginationContent>
           <PaginationItem>
             <PaginationPrevious

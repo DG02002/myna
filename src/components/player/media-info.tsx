@@ -146,7 +146,7 @@ function TrackRow({ track }: { track: ProbeTrackInfo }) {
         {track.codecParameterString ?? "Unknown codec"}
       </td>
       <td className="px-3 py-2 text-muted-foreground">
-        {details.length > 0 ? details : "—"}
+        {details.length > 0 ? details : "No additional details"}
       </td>
     </tr>
   )

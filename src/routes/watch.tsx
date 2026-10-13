@@ -383,16 +383,16 @@ function WatchPage() {
       <main className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-16 md:px-8 lg:px-8 text-center">
         <h1 className="text-xl font-semibold tracking-tight">
           {invalidShareLink
-            ? "This shared media link is invalid"
-            : "No saved media for this link"}
+            ? "Invalid shared link"
+            : "This item isn't in this browser's history"}
         </h1>
         <p className="text-muted-foreground max-w-lg text-balance">
           {invalidShareLink
-            ? "This link does not contain a valid HTTP or HTTPS media URL. Open the app to enter a different link."
-            : "Watch links point to history in this browser. The item may have been removed, or this link may have opened on another device. Open the app and paste the media URL to play it here."}
+            ? "This link doesn't contain a valid HTTP or HTTPS media URL. Add a media URL in Myna to start again."
+            : "Watch links use history saved in this browser. The item may have been removed, or the link may have opened on another device. Paste the media URL in Myna to play it."}
         </p>
         <Button asChild>
-          <Link to="/add">Open the app</Link>
+          <Link to="/add">Add a media URL</Link>
         </Button>
       </main>
     )
@@ -619,12 +619,14 @@ function ShareLinkButton({
       await navigator.clipboard.writeText(link.toString())
       announce("Share link copied.")
     } catch {
-      announce("Could not copy the share link.")
+      announce(
+        "Couldn't copy the share link. Check browser clipboard permissions and try again."
+      )
     }
   }
 
   return (
-    <div className="flex shrink-0 flex-col items-start gap-1">
+    <div className="myna-watch-action-button flex shrink-0 flex-col items-start gap-1">
       <Button
         type="button"
         size="lg"
@@ -634,12 +636,12 @@ function ShareLinkButton({
         <HugeiconsIcon
           icon={Share08Icon}
           strokeWidth={1.8}
-          className="size-4"
+          className="size-5"
         />
         Share
       </Button>
       {message ? (
-        <span className="text-muted-foreground text-xs" aria-live="polite">
+        <span className="text-muted-foreground text-base" aria-live="polite">
           {message}
         </span>
       ) : null}
@@ -665,20 +667,22 @@ function PlayerToolButton({
   onClick: () => void
 }) {
   return (
-    <Button
-      id={id}
-      type="button"
-      size="lg"
-      variant={active ? "secondary" : "outline"}
-      aria-expanded={dialog ? undefined : active}
-      aria-controls={dialog ? undefined : "watch-tools-panel"}
-      aria-haspopup={dialog ? "dialog" : undefined}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      <HugeiconsIcon icon={icon} strokeWidth={1.8} className="size-4" />
-      <span>{label}</span>
-    </Button>
+    <span className="myna-watch-action-button">
+      <Button
+        id={id}
+        type="button"
+        size="lg"
+        variant={active ? "secondary" : "outline"}
+        aria-expanded={dialog ? undefined : active}
+        aria-controls={dialog ? undefined : "watch-tools-panel"}
+        aria-haspopup={dialog ? "dialog" : undefined}
+        disabled={disabled}
+        onClick={onClick}
+      >
+        <HugeiconsIcon icon={icon} strokeWidth={1.8} className="size-5" />
+        <span>{label}</span>
+      </Button>
+    </span>
   )
 }
 
@@ -715,7 +719,7 @@ function BugReportDialog({
               Report a bug
             </AlertDialog.Title>
             <AlertDialog.Description className="mt-4 w-full text-pretty text-base text-muted-foreground">
-              Choose how you’d like to report an issue with Myna.
+              Choose where to report this issue.
             </AlertDialog.Description>
 
             <div className="myna-clipboard-dialog-actions mt-8 flex w-full flex-col gap-3">

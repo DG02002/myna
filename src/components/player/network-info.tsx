@@ -526,7 +526,7 @@ function describeNetworkState(
       detail:
         playback.state === "playing" && playback.bufferedAheadSeconds !== null
           ? `${formatBufferedAhead(playback.bufferedAheadSeconds)} buffered ahead. ${engineMode === "mediabunny" ? "Measured from audio queued for playback." : "Measured from the player's media buffer."}`
-          : "This status comes from the player’s current playback state.",
+          : "This status comes from the player's current playback state.",
     }
   }
 
@@ -628,7 +628,7 @@ function RateChart({
           className="text-subtitle-ass h-full w-full"
         />
       </div>
-      <div className="flex justify-between text-xs text-muted-foreground tabular-nums">
+      <div className="flex justify-between text-base text-muted-foreground tabular-nums">
         <span>2 minutes ago</span>
         <span>Now</span>
       </div>

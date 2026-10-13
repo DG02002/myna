@@ -117,7 +117,7 @@ export const DEMO_POSTERS = [
 ]
 
 // How long each still holds before the reel changes.
-const POSTER_ROTATE_MS = 5000
+const POSTER_ROTATE_MS = 7000
 
 // A shuffle bag, not a dice roll: the stills are shuffled and played
 // through before anything repeats — the way music players avoid repeating
@@ -152,6 +152,7 @@ function createPosterBag(avoid: number | null) {
 interface PosterReel {
   index: number
   bag: number[]
+  rotation: number
 }
 
 // Draws the next still from the bag, refilling when the cycle is spent.
@@ -163,15 +164,24 @@ function drawFromBag(current: PosterReel): PosterReel {
     const fresh = createPosterBag(current.index)
     const redrawn = fresh.shift()
 
-    return { index: redrawn ?? current.index, bag: fresh }
+    return {
+      index: redrawn ?? current.index,
+      bag: fresh,
+      rotation: current.rotation + 1,
+    }
   }
 
-  return { index: next, bag: rest }
+  return { index: next, bag: rest, rotation: current.rotation + 1 }
 }
 
 export function useRotatingPoster() {
   const reduced = useReducedMotion()
-  const [reel, setReel] = useState<PosterReel>({ index: 0, bag: [] })
+
+  const [reel, setReel] = useState<PosterReel>({
+    index: 0,
+    bag: [],
+    rotation: 0,
+  })
 
   // Random opening still and a fresh bag, dealt after hydration so the
   // server-rendered markup and the client agree on first paint.
@@ -182,7 +192,11 @@ export function useRotatingPoster() {
     setReel((current) => {
       const bag = createPosterBag(null)
 
-      return { index: bag.shift() ?? current.index, bag }
+      return {
+        index: bag.shift() ?? current.index,
+        bag,
+        rotation: current.rotation + 1,
+      }
     })
   }, [])
 
@@ -200,7 +214,7 @@ export function useRotatingPoster() {
     return () => window.clearInterval(rotate)
   }, [reduced])
 
-  return { index: reel.index }
+  return { index: reel.index, rotation: reel.rotation }
 }
 
 export function DemoPlayer({ poster }: { poster: { index: number } }) {
@@ -273,11 +287,10 @@ function DemoPoster({ index }: { index: number }) {
   )
 }
 
-// Each line is styled to match the real renderer it stands for — ASS
-// carries its authored outline (akarisub paints a stroke behind the fill),
-// SRT is the app's own white-on-plate overlay, and the forced PGS track
-// reads like the baked bitmap caption it is. The words belong to the current
-// reel and sit over the image below the player controls.
+// ASS uses the white Arial face and dark outline seen in the sample file.
+// SRT uses the player's white-on-dark overlay. PGS is image-based, so this
+// static line only suggests a bitmap caption; a real PGS track supplies its
+// own pixels. The lines sit below the player controls.
 function DemoSubtitleLine({
   selectedId,
   posterIndex,
@@ -298,7 +311,7 @@ function DemoSubtitleLine({
   if (selectedId === "en-ass") {
     return (
       <p className="absolute inset-x-3 bottom-12 z-10 text-center sm:inset-x-4 sm:bottom-20">
-        <span className="myna-subtitle-ass-outline text-subtitle-ass inline-block text-sm font-medium italic sm:text-base md:text-lg">
+        <span className="myna-subtitle-demo myna-subtitle-ass-outline inline-block max-w-full text-lg leading-snug font-normal text-white sm:text-xl md:text-2xl">
           {lines.ass}
         </span>
       </p>
@@ -308,7 +321,7 @@ function DemoSubtitleLine({
   if (selectedId === "sv-srt") {
     return (
       <p className="absolute inset-x-3 bottom-12 z-10 text-center sm:inset-x-4 sm:bottom-20">
-        <span className="inline-block max-w-full rounded-sm bg-black/75 px-2 py-0.5 text-xs leading-snug text-white shadow-sm sm:px-2 sm:py-1 sm:text-base">
+        <span className="inline-block max-w-full rounded-sm bg-black/75 px-2 py-0.5 text-lg leading-snug text-white shadow-sm sm:px-2 sm:py-1 sm:text-xl md:text-2xl">
           {lines.srt}
         </span>
       </p>
@@ -317,7 +330,7 @@ function DemoSubtitleLine({
 
   return (
     <p className="absolute inset-x-3 bottom-12 z-10 text-center sm:inset-x-4 sm:bottom-20">
-      <span className="myna-subtitle-pgs inline-block text-xs font-semibold tracking-wider text-white uppercase sm:text-sm sm:tracking-widest">
+      <span className="myna-subtitle-demo myna-subtitle-pgs inline-block max-w-full text-lg leading-snug font-normal text-white sm:text-xl md:text-2xl">
         {lines.pgs}
       </span>
     </p>

@@ -229,8 +229,12 @@ function ResumeRecoveryNotice({
       className="absolute inset-0 z-50 grid place-items-center bg-black/70 p-4"
     >
       <div className="max-w-sm rounded-xl bg-background p-5 text-center text-foreground shadow-xl">
-        <p className="mb-3 text-sm">{recoveryMessage(status)}</p>
-        <Button disabled={status === "pending"} onClick={onStartFromBeginning}>
+        <p className="mb-3 text-base">{recoveryMessage(status)}</p>
+        <Button
+          size="lg"
+          disabled={status === "pending"}
+          onClick={onStartFromBeginning}
+        >
           {recoveryActionLabel(status)}
         </Button>
       </div>

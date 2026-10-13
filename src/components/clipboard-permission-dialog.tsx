@@ -135,11 +135,11 @@ export function ClipboardPermissionDialog({
           <div className="flex flex-col items-center px-10 pt-6 pb-10 text-center">
             <ClipboardAccessIcon className="size-12" shimmerVisible={open} />
             <AlertDialog.Title className="mt-4 w-full text-2xl leading-tight font-normal sm:text-3xl">
-              Paste links faster
+              Show clipboard suggestions
             </AlertDialog.Title>
             <AlertDialog.Description className="mt-4 w-full text-pretty text-base text-muted-foreground">
-              Allow clipboard access and Myna can spot a copied link and offer
-              it above this input. Nothing plays until you choose the link.
+              Allow clipboard access to show a copied media link above the
+              field. Choose the link to play it.
             </AlertDialog.Description>
 
             <div className="myna-clipboard-dialog-actions mt-8 flex w-full flex-col gap-3">
@@ -162,7 +162,7 @@ export function ClipboardPermissionDialog({
               </AlertDialog.Cancel>
             </div>
             {allowFailed ? (
-              <p className="mt-4 text-sm text-destructive" role="alert">
+              <p className="mt-4 text-base text-destructive" role="alert">
                 Clipboard access was blocked. Paste a media URL into the field
                 instead.
               </p>

@@ -21,16 +21,17 @@ export interface PlaybackFailureMessage {
 
 const INVALID_URL_MESSAGES: Record<InvalidUrlReason, PlaybackFailureMessage> = {
   empty: {
-    title: "Enter a media link",
-    description: "Paste the direct link to a video or audio file.",
+    title: "Enter a media URL",
+    description:
+      "Paste a direct link to a video or audio file, or an HLS playlist.",
   },
   malformed: {
-    title: "That doesn't look like a link",
-    description: "Paste a full media URL, starting with https:// or http://.",
+    title: "Check the media URL",
+    description: "Enter a full URL that starts with https:// or http://.",
   },
   "unsupported-scheme": {
-    title: "Only web links can play",
-    description: "Myna plays http:// and https:// links to media files.",
+    title: "Use an HTTP or HTTPS link",
+    description: "Myna plays media URLs that start with http:// or https://.",
   },
 }
 
@@ -45,21 +46,21 @@ const FAILURE_MESSAGES: Record<
   "playback-aborted": {
     title: "Playback stopped",
     description:
-      "The file stopped loading before it finished. The link may have expired, or the server dropped the connection.",
+      "Loading stopped before the file finished. The link may have expired, or the server may have ended the connection. Check the link and try again.",
   },
   network: {
     title: "Couldn't reach the server",
     description:
-      "Myna couldn't fetch the file. Open the link in a new tab to check it still works, then try again.",
+      "Myna couldn't fetch the file. Open the link in a new tab to check that it works, then try again.",
   },
   "upstream-http": {
     title: "The media server is unavailable",
     description: "The server returned HTTP {status}. Try the link again later.",
   },
   "invalid-range": {
-    title: "The media server returned an invalid response",
+    title: "Couldn't read this media source",
     description:
-      "Advanced playback could not read the requested byte range. Try opening the link directly or use another source.",
+      "The server didn't return the requested media bytes. Try opening the link directly or use another source.",
   },
   "byte-access-unavailable": {
     title: "Advanced playback can't read this link",
@@ -67,34 +68,32 @@ const FAILURE_MESSAGES: Record<
       "The browser blocked access to the media bytes. The link may still play in the browser's built-in player.",
   },
   "read-timeout": {
-    title: "The media server stopped responding",
-    description:
-      "The server stopped sending media data. Check the link and try again.",
+    title: "The media server stopped sending data",
+    description: "Check the link and try again.",
   },
   "read-truncated": {
     title: "The media response ended early",
     description:
-      "The server stopped before the requested media data arrived. Try again or use another source.",
+      "The server stopped before sending all requested media bytes. Try again or use another source.",
   },
   decoder: {
-    title: "The selected decoder failed",
-    description:
-      "Myna could not decode this track. Try another audio track or playback engine.",
+    title: "Myna couldn't start this decoder",
+    description: "Try another audio track or playback engine.",
   },
   decode: {
     title: "This track couldn't be decoded",
     description:
-      "The selected codec may be unsupported, or the media data may be corrupt or truncated.",
+      "This codec may be unsupported, or the media may be damaged or incomplete. Try another track or source.",
   },
   "unsupported-container": {
-    title: "This format isn't supported",
+    title: "This media format isn't supported",
     description:
-      "The browser's built-in player can't open this container or codec combination. Try a different file.",
+      "The browser can't play this container and codec combination. Try another source.",
   },
   "native-playback": {
     title: "Playback failed",
     description:
-      "The player reported an unexpected error. Try reloading the page or a different link.",
+      "The browser reported a playback error. Reload the page or try another link.",
   },
 }
 

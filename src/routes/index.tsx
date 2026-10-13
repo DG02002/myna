@@ -5,11 +5,13 @@ import { motion, MotionConfig, type Variants } from "motion/react"
 import { type ReactNode } from "react"
 
 import AnimatedGradient from "#/components/marketing/animated-gradient"
+import { BlurReveal } from "#/components/marketing/blur-reveal"
 import {
   DEMO_POSTERS,
   DemoPlayer,
   useRotatingPoster,
 } from "#/components/marketing/demo-player"
+import { FAQSection } from "#/components/marketing/faq-section"
 import { GitHubLockup } from "#/components/marketing/github-mark"
 import { SITE_DESCRIPTION, SITE_ORIGIN } from "#/lib/seo"
 
@@ -56,6 +58,7 @@ function MarketingPage() {
         <Hero />
         <FormatsSection />
         <OpenSourceSection />
+        <FAQSection />
         <AttributionSection />
       </main>
     </MotionConfig>
@@ -96,20 +99,18 @@ function Hero() {
           animate="show"
           className="typeset typeset-marketing typeset-hero flex w-full flex-col items-center"
         >
-          <motion.h1
-            variants={RISE}
-            className="myna-display font-medium tracking-tight text-white"
-          >
-            MKV plays here.
-          </motion.h1>
+          <BlurReveal
+            className="myna-display myna-display-single-line font-medium tracking-tight text-white"
+            rotation={poster.rotation}
+          />
 
           <motion.p
             variants={RISE}
             className="max-w-3xl text-2xl font-medium leading-normal text-white/90"
           >
-            Paste a direct link to any media file and play it in your browser.
-            Myna decodes surround sound audio and styled subtitles directly on
-            your device.
+            Paste a direct media link to switch audio tracks and choose embedded
+            or external subtitles. Myna decodes supported AC-3, E-AC-3, and DTS
+            audio on your device.
           </motion.p>
 
           <motion.div
@@ -149,7 +150,8 @@ function FormatsSection() {
           </h2>
 
           <p className="myna-format-description text-white/80">
-            Hardware decoding with client-side WebCodecs fallback.
+            Myna uses browser playback first. WebCodecs handles compatible video
+            during advanced playback.
           </p>
 
           <div className="myna-format-supported">
@@ -159,21 +161,18 @@ function FormatsSection() {
 
             <ul className="myna-format-list text-white/95">
               <li>· Matroska (MKV), MP4, WebM</li>
-              <li>· AV1</li>
-              <li>· HEVC (H.265)</li>
-              <li>· H.264 (AVC)</li>
-              <li>· VP9</li>
+              <li>· HLS playlists (.m3u8)</li>
+              <li>· H.264, HEVC, VP9, and AV1 when available in the browser</li>
             </ul>
           </div>
 
           <div className="myna-format-unsupported">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-white/60">
-              Not Supported
+              Limits
             </h3>
 
             <ul className="myna-format-list text-white/70">
-              <li>· Legacy formats (AVI, WMV)</li>
-              <li>· DRM-protected streams</li>
+              <li>· DRM-protected streams aren&apos;t supported</li>
             </ul>
           </div>
         </div>
@@ -185,7 +184,8 @@ function FormatsSection() {
           </h2>
 
           <p className="myna-format-description text-white/80">
-            On-device WebAssembly decoders for multichannel surround.
+            On-device WebAssembly decoders add support for select surround
+            codecs.
           </p>
 
           <div className="myna-format-supported">
@@ -196,19 +196,18 @@ function FormatsSection() {
             <ul className="myna-format-list text-white/95">
               <li>· Dolby Digital Plus (E-AC-3)</li>
               <li>· Dolby Digital (AC-3)</li>
-              <li>· DTS Multichannel Audio</li>
-              <li>· AAC, Opus, FLAC</li>
+              <li>· DTS audio</li>
+              <li>· AAC, Opus, and FLAC when supported by the browser</li>
             </ul>
           </div>
 
           <div className="myna-format-unsupported">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-white/60">
-              Not Supported
+              Limits
             </h3>
 
             <ul className="myna-format-list text-white/70">
-              <li>· Uncompressed multichannel LPCM</li>
-              <li>· TrueHD Atmos without spatial hardware</li>
+              <li>· No Myna decoder for TrueHD or multichannel LPCM</li>
             </ul>
           </div>
         </div>
@@ -220,7 +219,7 @@ function FormatsSection() {
           </h2>
 
           <p className="myna-format-description text-white/80">
-            Full styling, custom typography, and bitmap graphics.
+            Embedded text and bitmap subtitles, plus external UTF-8 files.
           </p>
 
           <div className="myna-format-supported">
@@ -229,19 +228,18 @@ function FormatsSection() {
             </h3>
 
             <ul className="myna-format-list text-white/95">
-              <li>· ASS &amp; SSA (Styled subtitles)</li>
-              <li>· PGS (Blu-ray bitmaps)</li>
-              <li>· SRT &amp; WebVTT</li>
+              <li>· Matroska: UTF-8 text, styled ASS/SSA, and PGS</li>
+              <li>· Direct links: external UTF-8 SRT and WebVTT</li>
             </ul>
           </div>
 
           <div className="myna-format-unsupported">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-white/60">
-              Not Supported
+              Limits
             </h3>
 
             <ul className="myna-format-list text-white/70">
-              <li>· Binary DVD VobSub (.sub/.idx)</li>
+              <li>· DVD VobSub (.sub/.idx) isn&apos;t supported</li>
             </ul>
           </div>
         </div>
@@ -270,9 +268,10 @@ function OpenSourceSection() {
           </h2>
 
           <p className="mx-auto mt-8 max-w-2xl text-white/80">
-            Playback and decoding happen in your browser. When direct byte
-            access is blocked, Myna’s Worker can relay media requests to the
-            source. Myna does not transcode media or keep a server-side library.
+            Playback and decoding happen in your browser. If advanced playback
+            needs media bytes the browser cannot read directly, Myna&apos;s
+            Worker relays those byte requests. Myna does not transcode media or
+            keep a server-side library.
           </p>
 
           <div className="mt-10 flex justify-center">
@@ -294,11 +293,13 @@ function OpenSourceSection() {
 
 function AttributionSection() {
   return (
-    <section className="myna-section myna-glass-edge border-t border-white/10 bg-black py-16 text-muted-foreground sm:py-28 lg:py-40 typeset typeset-marketing">
-      <div className="mx-auto flex w-full max-w-5xl flex-col items-center px-6 text-center md:px-8 lg:px-8">
+    <section className="myna-section myna-home-attribution myna-glass-edge border-t border-white/10 bg-black py-16 text-muted-foreground sm:py-28 lg:py-40 typeset typeset-marketing">
+      <HomeFooterEffect />
+
+      <div className="relative z-10 mx-auto flex w-full max-w-5xl flex-col items-center px-6 text-center md:px-8 lg:px-8">
         <Reveal className="flex flex-col items-center">
           <h2 className="text-2xl font-semibold tracking-tight text-white text-balance sm:text-3xl md:text-4xl lg:text-5xl">
-            Trademark and Attribution Notices
+            Trademark and attribution notices
           </h2>
 
           <div className="typeset-flow mx-auto mt-10 max-w-3xl font-normal text-white/70">
@@ -321,13 +322,31 @@ function AttributionSection() {
               Myna is free and open-source software released under the MIT
               License. Demo stills are from 12 Angry Men (1957), Taxi Driver
               (1976), Mindhunter, Frieren: Beyond Journey&apos;s End, and Solo
-              Leveling — shown for illustration only, with all rights remaining
-              with their respective owners.
+              Leveling. They are shown for illustration only, with all rights
+              remaining with their respective owners.
             </p>
           </div>
         </Reveal>
       </div>
     </section>
+  )
+}
+
+function HomeFooterEffect() {
+  return (
+    <div aria-hidden="true" className="myna-home-footer-backdrop">
+      <AnimatedGradient
+        config={{
+          preset: "Mist",
+          color2: "#d1d1d1",
+          proportion: 60,
+          speed: 18,
+          patternSize: 14,
+        }}
+        className="myna-home-footer-gradient"
+      />
+      <div className="myna-home-footer-scrim absolute inset-0" />
+    </div>
   )
 }
 
@@ -357,7 +376,7 @@ function CallToAction() {
       to="/add"
       className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex min-h-14 items-center gap-2.5 rounded-full px-8 font-display text-base font-medium transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-4 focus-visible:ring-offset-background max-sm:w-full max-sm:justify-center"
     >
-      Open Myna
+      Play a media link
       <HugeiconsIcon icon={ArrowRightIcon} className="size-5" />
     </Link>
   )
