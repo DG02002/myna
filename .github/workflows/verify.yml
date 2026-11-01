@@ -31,7 +31,7 @@ jobs:
             !/.repos/
           sparse-checkout-cone-mode: false
           persist-credentials: false
-      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+      - uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0
         with:
           advanced-security: false
 
@@ -81,7 +81,7 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
       - name: Set up pnpm 12 and Node.js
-        uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        uses: pnpm/setup@fa36a5ef7dcdefc3a7cb25655c122e00cf6e636e # v3.1.2
         with:
           version: 12.5.1
           runtime: node@26.9.0
@@ -101,7 +101,7 @@ jobs:
           pnpm build 2>&1 | tee build.log
       - name: Upload the build log
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: myna-build-log-${{ github.sha }}
           path: build.log
@@ -109,7 +109,7 @@ jobs:
           retention-days: 7
       - name: Upload verified release artifacts
         if: github.ref_type == 'tag'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: myna-release-${{ github.sha }}
           path: |
@@ -159,7 +159,7 @@ jobs:
           done
 
       - name: Set up pnpm 12 and Node.js
-        uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        uses: pnpm/setup@fa36a5ef7dcdefc3a7cb25655c122e00cf6e636e # v3.1.2
         with:
           version: 12.5.1
           runtime: node@26.9.0
@@ -173,7 +173,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Download the verified release artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: myna-release-${{ github.sha }}
           path: dist
